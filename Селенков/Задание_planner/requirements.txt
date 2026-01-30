@@ -1,0 +1,4 @@
+pytest
+python-docx
+docxcompose
+psycopg2-binary

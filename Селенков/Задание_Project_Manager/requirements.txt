@@ -1,0 +1,9 @@
+psycopg2-binary
+openpyxl
+python-docx
+matplotlib
+pillow
+markdown
+pytest
+pytest-mock
+pytest-cov
