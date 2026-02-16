@@ -1,0 +1,38 @@
+# В корне репозитория создайте/отредактируйте .gitignore
+echo "# Python" > .gitignore
+echo "__pycache__/" >> .gitignore
+echo "*.py[cod]" >> .gitignore
+echo "*.so" >> .gitignore
+echo ".Python" >> .gitignore
+echo "build/" >> .gitignore
+echo "develop-eggs/" >> .gitignore
+echo "dist/" >> .gitignore
+echo "downloads/" >> .gitignore
+echo "eggs/" >> .gitignore
+echo ".eggs/" >> .gitignore
+echo "lib/" >> .gitignore
+echo "lib64/" >> .gitignore
+echo "parts/" >> .gitignore
+echo "sdist/" >> .gitignore
+echo "var/" >> .gitignore
+echo "wheels/" >> .gitignore
+echo "*.egg-info/" >> .gitignore
+echo ".installed.cfg" >> .gitignore
+echo "*.egg" >> .gitignore
+echo "*.log" >> .gitignore
+echo "" >> .gitignore
+echo "# IDE" >> .gitignore
+echo ".idea/" >> .gitignore
+echo ".vscode/" >> .gitignore
+echo "*.swp" >> .gitignore
+echo "*.swo" >> .gitignore
+echo "" >> .gitignore
+echo "# Project-specific" >> .gitignore
+echo "messenger/server/messenger.db" >> .gitignore  # Локальная БД
+echo "*.coverage" >> .gitignore
+echo "reports/charts/*.png" >> .gitignore  # Сгенерированные графики
+echo "reports/*.docx" >> .gitignore
+echo "reports/*.xlsx" >> .gitignore
+echo "Селенков/Задание_*/достижения.db" >> .gitignore
+echo "Селенков/Задание_*/educational_planner.db" >> .gitignore
+# Добавьте другие бинарные/временные файлы по мере необходимости
