@@ -35,4 +35,5 @@ echo "reports/*.docx" >> .gitignore
 echo "reports/*.xlsx" >> .gitignore
 echo "Селенков/Задание_*/достижения.db" >> .gitignore
 echo "Селенков/Задание_*/educational_planner.db" >> .gitignore
+messenger/client/config.json
 # Добавьте другие бинарные/временные файлы по мере необходимости
