@@ -1,5 +1,7 @@
 from datetime import datetime
-from database.db import get_db_connection
+
+# Исправляем импорт - добавляем server.
+from server.database.db import get_db_connection
 from typing import List, Optional
 
 class MessageModel:
@@ -30,7 +32,8 @@ class MessageModel:
             ORDER BY timestamp DESC LIMIT ?
         """, (user1_id, user2_id, user2_id, user1_id, limit))
         
-        messages = [dict(row) for row in cursor.fetchall()]
+        rows = cursor.fetchall()
+        messages = [dict(row) for row in rows] if rows else []
         conn.close()
         return messages
 
@@ -43,7 +46,8 @@ class MessageModel:
             SELECT * FROM messages WHERE receiver_id = ? AND is_read = FALSE
         """, (user_id,))
         
-        messages = [dict(row) for row in cursor.fetchall()]
+        rows = cursor.fetchall()
+        messages = [dict(row) for row in rows] if rows else []
         conn.close()
         return messages
 

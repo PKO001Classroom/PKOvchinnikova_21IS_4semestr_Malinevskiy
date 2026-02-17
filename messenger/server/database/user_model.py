@@ -1,6 +1,7 @@
-from datetime import datetime
-from database.db import get_db_connection
-import sqlite3
+from datetime import datetime, timedelta
+
+# Исправляем импорт - добавляем server.
+from server.database.db import get_db_connection
 
 class UserModel:
     @staticmethod
@@ -76,7 +77,8 @@ class UserModel:
             AND last_seen < ?
         """, (timeout_ago,))
         
-        inactive_users = [row["id"] for row in cursor.fetchall()]
+        rows = cursor.fetchall()
+        inactive_users = [row["id"] for row in rows] if rows else []
         
         # Устанавливаем их статус в оффлайн
         for user_id in inactive_users:
@@ -95,7 +97,8 @@ class UserModel:
         conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute("SELECT id, username, is_online, status, last_seen FROM users")
-        users = [dict(row) for row in cursor.fetchall()]
+        rows = cursor.fetchall()
+        users = [dict(row) for row in rows] if rows else []
         conn.close()
         return users
 

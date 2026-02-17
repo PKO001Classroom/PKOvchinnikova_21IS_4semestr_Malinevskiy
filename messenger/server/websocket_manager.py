@@ -1,9 +1,8 @@
 from typing import Dict, Set
-from fastapi import WebSocket, WebSocketDisconnect
+from fastapi import WebSocket
 import asyncio
 import logging
 from datetime import datetime
-import json
 
 logger = logging.getLogger(__name__)
 

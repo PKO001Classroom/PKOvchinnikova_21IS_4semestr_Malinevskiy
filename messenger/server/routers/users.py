@@ -1,7 +1,9 @@
 from fastapi import APIRouter, HTTPException, Depends
-from database.user_model import UserModel  # Измененный импорт
-from schemas.user import UserResponse, UserUpdate
-from dependencies import get_current_user
+
+# Исправляем импорты - добавляем server.
+from server.database.user_model import UserModel
+from server.schemas.user import UserResponse, UserUpdate
+from server.dependencies import get_current_user
 
 router = APIRouter()
 

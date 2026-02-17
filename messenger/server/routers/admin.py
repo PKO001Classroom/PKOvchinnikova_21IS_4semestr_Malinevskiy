@@ -1,8 +1,10 @@
 from fastapi import APIRouter, HTTPException, Depends
-from database.user_model import UserModel  # Измененный импорт
-from database.message_model import MessageModel  # Измененный импорт
-from dependencies import get_current_user
-from database.db import get_db_connection, init_db
+
+# Исправляем импорты - добавляем server.
+from server.database.user_model import UserModel
+from server.database.message_model import MessageModel
+from server.dependencies import get_current_user
+from server.database.db import get_db_connection
 
 router = APIRouter()
 
@@ -14,7 +16,8 @@ async def get_all_messages(current_user: dict = Depends(get_current_user)):
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM messages ORDER BY timestamp DESC")
-    messages = [dict(row) for row in cursor.fetchall()]
+    rows = cursor.fetchall()
+    messages = [dict(row) for row in rows] if rows else []
     conn.close()
     
     return {"messages": messages}

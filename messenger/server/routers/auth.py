@@ -1,10 +1,12 @@
 from fastapi import APIRouter, HTTPException, Depends
 from datetime import datetime, timedelta
-from database.user_model import UserModel
-from schemas.user import UserCreate, UserLogin, UserResponse
+
+# Исправляем импорты - добавляем server.
+from server.database.user_model import UserModel
+from server.schemas.user import UserCreate, UserLogin, UserResponse
 from passlib.context import CryptContext
 import jwt
-from dependencies import get_current_user
+from server.dependencies import get_current_user
 
 router = APIRouter()
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -61,10 +63,12 @@ async def register(user: UserCreate):
     
     # Автоматически делаем первого пользователя админом
     is_admin = False
+    from server.database.db import get_db_connection
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT COUNT(*) as count FROM users")
-    user_count = cursor.fetchone()["count"]
+    row = cursor.fetchone()
+    user_count = row["count"] if row else 0
     conn.close()
     
     if user_count == 0:  # Первый пользователь становится админом

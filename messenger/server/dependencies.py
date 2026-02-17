@@ -1,7 +1,9 @@
 from fastapi import HTTPException, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import jwt
-from database.user_model import UserModel
+
+# Исправляем импорт - добавляем server.
+from server.database.user_model import UserModel
 
 security = HTTPBearer()
 SECRET_KEY = "your-secret-key-here"

@@ -1,12 +1,13 @@
 from fastapi import APIRouter, HTTPException, Depends, Query
-from database.message_model import MessageModel  # Измененный импорт
-from database.user_model import UserModel  # Измененный импорт
-from database.db import get_db_connection
-from schemas.message import MessageCreate, MessageResponse, MessagesList
-from dependencies import get_current_user
-from websocket_manager import manager
+
+# Исправляем импорты - добавляем server.
+from server.database.message_model import MessageModel
+from server.database.user_model import UserModel
+from server.database.db import get_db_connection
+from server.schemas.message import MessageCreate, MessageResponse, MessagesList
+from server.dependencies import get_current_user
+from server.websocket_manager import manager
 import logging
-import base64
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -29,7 +30,7 @@ async def send_message(
     current_user: dict = Depends(get_current_user)
 ):
     # Для изображений сохраняем file_data в базе
-    message_type = message.message_type.value
+    message_type = message.message_type.value if hasattr(message.message_type, 'value') else message.message_type
     content = message.content
     
     # Если это изображение и есть file_data, сохраняем его
@@ -49,7 +50,8 @@ async def send_message(
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM messages WHERE id = ?", (message_id,))
-    message_data = dict(cursor.fetchone())
+    row = cursor.fetchone()
+    message_data = dict(row) if row else {}
     conn.close()
     
     # Явно добавляем file_data в ответ, если он есть
@@ -86,7 +88,8 @@ async def delete_message(
     try:
         # Получаем полную информацию о сообщении
         cursor.execute("SELECT id, sender_id, receiver_id, content, timestamp FROM messages WHERE id = ?", (message_id,))
-        message = cursor.fetchone()
+        row = cursor.fetchone()
+        message = dict(row) if row else None
         
         if not message:
             raise HTTPException(status_code=404, detail="Message not found")
