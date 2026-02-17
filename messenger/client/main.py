@@ -11,7 +11,7 @@ from PyQt5.QtCore import QTimer
 # Добавляем путь к корневой директории
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# ИСПРАВЛЕННЫЕ ИМПОРТЫ - убираем messenger.
+# Импорт модулей из новой структуры
 try:
     from client.ui.login_dialog import LoginDialog
     from client.ui.main_window import MainWindow
@@ -21,7 +21,7 @@ try:
     from client.utils.notifications import get_notification_manager
     from client.config import update_server_config, APP_NAME, APP_VERSION
 except ImportError as e:
-    print(f"❌ Ошибка импорта: {e}")
+    print(f"Ошибка импорта: {e}")
     print("Проверьте структуру проекта и наличие необходимых модулей.")
     sys.exit(1)
 
@@ -56,18 +56,18 @@ class MessengerClient:
     def run(self):
         """Запуск клиента"""
         print("=" * 50)
-        print(f"🚀 {APP_NAME} Client v{APP_VERSION}")
+        print(f"{APP_NAME} Client v{APP_VERSION}")
         print("=" * 50)
         
         try:
             # Проверяем настройки уведомлений
             if self.auth_manager.get_setting('notifications', True):
-                print("🔔 Уведомления включены")
+                print("Уведомления включены")
             
             if self.auth_manager.get_setting('sound_notifications', True):
-                print("🔊 Звуковые уведомления включены")
+                print("Звуковые уведомления включены")
             
-            print(f"🎨 Текущая тема: {self.theme_manager.current_theme}")
+            print(f"Текущая тема: {self.theme_manager.current_theme}")
             
             # Автозапуск серверов
             self.auto_start_servers()
@@ -85,14 +85,14 @@ class MessengerClient:
                 update_server_config(server_data['ip'], server_data['port'])
                 self.server_url = f"http://{server_data['ip']}:{server_data['port']}"
                 
-                print(f"✅ Подключено к серверу: {server_data['name']}")
-                print(f"   📡 Адрес: {server_data['ip']}:{server_data['port']}")
-                print(f"   👤 Пользователь: {self.current_user.get('username')}")
-                print(f"   🔒 Защита паролем: {'Да' if server_data.get('is_password_protected') else 'Нет'}")
+                print(f"Подключено к серверу: {server_data['name']}")
+                print(f"Адрес: {server_data['ip']}:{server_data['port']}")
+                print(f"Пользователь: {self.current_user.get('username')}")
+                print(f"Защита паролем: {'Да' if server_data.get('is_password_protected') else 'Нет'}")
                 
                 # Показываем уведомление об успешном подключении
                 self.notification_manager.show_notification(
-                    "✅ Подключение успешно",
+                    "Подключение успешно",
                     f"Вы подключены к серверу {server_data['name']}",
                     "message"
                 )
@@ -115,67 +115,67 @@ class MessengerClient:
                     
                     return self.app.exec_()
                 else:
-                    QMessageBox.critical(None, "❌ Ошибка", 
+                    QMessageBox.critical(None, "Ошибка", 
                                        "Не удалось получить данные для подключения")
                     return 1
             else:
-                print("🚪 Выход из приложения")
+                print("Выход из приложения")
                 return 0
                 
         except Exception as e:
-            print(f"❌ Критическая ошибка: {e}")
+            print(f"Критическая ошибка: {e}")
             import traceback
             traceback.print_exc()
             
             # Показываем уведомление об ошибке
             self.notification_manager.notify_error(f"Критическая ошибка: {str(e)}")
             
-            QMessageBox.critical(None, "❌ Критическая ошибка", 
+            QMessageBox.critical(None, "Критическая ошибка", 
                                f"Не удалось запустить приложение:\n{str(e)}")
             return 1
     
     def auto_start_servers(self):
         """Автозапуск серверов с флагом auto_start"""
-        print("🔍 Проверка серверов для автозапуска...")
+        print("Проверка серверов для автозапуска...")
         
         try:
             servers = self.server_manager.get_server_list()
             auto_start_servers = [s for s in servers if s.get('auto_start', False)]
             
             if auto_start_servers:
-                print(f"   Найдено серверов для автозапуска: {len(auto_start_servers)}")
+                print(f"Найдено серверов для автозапуска: {len(auto_start_servers)}")
                 
                 for server in auto_start_servers:
                     server_name = server['name']
                     
                     # Проверяем, запущен ли уже сервер
                     if not self.server_manager.check_server_connection(server_name):
-                        print(f"   🚀 Запуск сервера: {server_name}")
+                        print(f"Запуск сервера: {server_name}")
                         
                         # Для автозапуска пропускаем серверы с паролями
                         if server.get('password_protected'):
-                            print(f"   ⚠️ Сервер {server_name} требует пароль - пропускаем")
+                            print(f"Сервер {server_name} требует пароль - пропускаем")
                             continue
                         
                         success, message = self.server_manager.start_server(server_name)
                         if success:
-                            print(f"   ✅ {message}")
+                            print(f"✅ {message}")
                             
                             # Уведомление об автозапуске
                             self.notification_manager.show_notification(
-                                "🚀 Автозапуск сервера",
+                                "Автозапуск сервера",
                                 f"Сервер {server_name} успешно запущен",
                                 "message"
                             )
                         else:
-                            print(f"   ❌ Ошибка: {message}")
+                            print(f"❌ Ошибка: {message}")
                     else:
-                        print(f"   ✅ Сервер {server_name} уже запущен")
+                        print(f"Сервер {server_name} уже запущен")
             else:
-                print("   ℹ️ Серверы для автозапуска не найдены")
+                print("Серверы для автозапуска не найдены")
                 
         except Exception as e:
-            print(f"   ⚠️ Ошибка при автозапуске серверов: {e}")
+            print(f"Ошибка при автозапуске серверов: {e}")
     
     def save_settings(self):
         """Сохранение настроек приложения"""
@@ -184,14 +184,14 @@ class MessengerClient:
             if self.server_data:
                 self.auth_manager.save_last_server(self.server_data)
             
-            print("   💾 Настройки сохранены")
+            print("Настройки сохранены")
             
         except Exception as e:
-            print(f"   ⚠️ Ошибка сохранения настроек: {e}")
+            print(f"Ошибка сохранения настроек: {e}")
     
     def cleanup(self):
         """Очистка ресурсов при завершении"""
-        print("🧹 Очистка ресурсов...")
+        print("Очистка ресурсов...")
         # Здесь можно добавить закрытие всех соединений
 
 
@@ -204,10 +204,10 @@ def main():
         client.cleanup()
         return exit_code
     except KeyboardInterrupt:
-        print("\n\n🚪 Приложение завершено пользователем")
+        print("\n\nПриложение завершено пользователем")
         return 0
     except Exception as e:
-        print(f"\n\n❌ Необработанное исключение: {e}")
+        print(f"\n\nНеобработанное исключение: {e}")
         import traceback
         traceback.print_exc()
         return 1

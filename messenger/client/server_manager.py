@@ -145,6 +145,19 @@ class ServerManager:
         
         except Exception as e:
             logger.error(f"Ошибка загрузки серверов: {e}")
+    def check_existing_server_on_localhost(self) -> Optional[Dict[str, Any]]:
+        """
+        Проверка наличия запущенного сервера на localhost.
+        
+        Returns:
+            Данные сервера или None если не найден
+        """
+        for name, config in self.servers.items():
+            if config.ip in ['127.0.0.1', 'localhost']:
+                # Проверяем, запущен ли сервер
+                if self.check_server_connection(name):
+                    return self.get_server_status(name)
+        return None
     
     def save_server_config(self, config: ServerConfig) -> bool:
         """
@@ -741,61 +754,80 @@ class ServerManager:
             auto_start=False
         )
     
-    def get_quick_start_server(self) -> Tuple[bool, str, Dict[str, Any]]:
-        """
-        Создание быстрого сервера для новичков.
+def get_quick_start_server(self) -> Tuple[bool, str, Dict[str, Any]]:
+    """
+    Создание быстрого сервера для новичков.
+    
+    Returns:
+        (успех, сообщение, данные сервера)
+    """
+    try:
+        # Сначала проверяем, есть ли уже сервер на localhost
+        existing_server = self.check_existing_server_on_localhost()
+        if existing_server:
+            return True, "Найден существующий сервер", existing_server
         
-        Returns:
-            (успех, сообщение, данные сервера)
-        """
-        try:
-            # Получаем локальный IP
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.connect(("8.8.8.8", 80))
-            local_ip = s.getsockname()[0]
-            s.close()
-            
-            # Ищем свободный порт
-            port = 8000
-            while port < 8100:
-                if self._check_port_available(local_ip, port):
-                    break
-                port += 1
-            
-            if port >= 8100:
-                return False, "Не удалось найти свободный порт", {}
-            
-            # Генерируем имя
-            import random
-            adjectives = ["Быстрый", "Удобный", "Надежный", "Локальный", "Домашний", "Тестовый"]
-            nouns = ["Сервер", "Хаб", "Чат", "Мессенджер", "Узел", "Портал"]
-            
-            name = f"{random.choice(adjectives)} {random.choice(nouns)}"
-            
-            # Создаем сервер без пароля для простоты
-            success, message = self.create_server(
-                name=name,
-                ip=local_ip,
-                port=port,
-                description="Автоматически созданный сервер для быстрого старта",
-                password=None,
-                auto_start=False
-            )
-            
-            if success:
+        # Получаем локальный IP
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        local_ip = s.getsockname()[0]
+        s.close()
+        
+        # Ищем свободный порт
+        port = 8000
+        while port < 8100:
+            if self._check_port_available(local_ip, port):
+                break
+            port += 1
+        
+        if port >= 8100:
+            return False, "Не удалось найти свободный порт", {}
+        
+        # Генерируем имя
+        import random
+        adjectives = ["Быстрый", "Удобный", "Надежный", "Локальный", "Домашний", "Тестовый"]
+        nouns = ["Сервер", "Хаб", "Чат", "Мессенджер", "Узел", "Портал"]
+        
+        name = f"{random.choice(adjectives)} {random.choice(nouns)}"
+        
+        # Создаем сервер без пароля для простоты
+        success, message = self.create_server(
+            name=name,
+            ip=local_ip,
+            port=port,
+            description="Автоматически созданный сервер для быстрого старта",
+            password=None,
+            auto_start=False
+        )
+        
+        if success:
+            # Запускаем сервер
+            start_success, start_message = self.start_server(name)
+            if start_success:
                 server_data = {
                     "name": name,
                     "ip": local_ip,
                     "port": port,
                     "description": "Автоматически созданный сервер",
-                    "password_protected": False
+                    "password_protected": False,
+                    "is_running": True
                 }
-                return True, message, server_data
+                return True, f"Сервер создан и запущен: {start_message}", server_data
             else:
-                return False, message, {}
-                
-        except Exception as e:
-            return False, f"Ошибка создания быстрого сервера: {str(e)}", {}
+                server_data = {
+                    "name": name,
+                    "ip": local_ip,
+                    "port": port,
+                    "description": "Автоматически созданный сервер",
+                    "password_protected": False,
+                    "is_running": False
+                }
+                return True, f"Сервер создан, но не запущен: {start_message}", server_data
+        else:
+            return False, message, {}
+            
+    except Exception as e:
+        return False, f"Ошибка создания быстрого сервера: {str(e)}", {}
 
 
 # Глобальный экземпляр для удобного доступа

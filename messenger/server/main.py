@@ -8,7 +8,7 @@ import sys
 import asyncio
 import os
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, WebSocket
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 import json
@@ -37,9 +37,9 @@ async def check_inactive_users_periodically():
         try:
             inactive_users = UserModel.check_inactive_users(timeout_minutes=5)
             if inactive_users:
-                print(f"📴 Пользователи отмечены как оффлайн из-за неактивности: {inactive_users}")
+                print(f"Пользователи отмечены как оффлайн из-за неактивности: {inactive_users}")
         except Exception as e:
-            print(f"⚠️ Ошибка проверки неактивных пользователей: {e}")
+            print(f"Ошибка проверки неактивных пользователей: {e}")
         
         await asyncio.sleep(60)  # Проверка каждую минуту
 
@@ -49,11 +49,11 @@ async def lifespan(app: FastAPI):
     """
     Контекстный менеджер для управления жизненным циклом приложения.
     """
-    print("🚀 Инициализация сервера...")
+    print("Инициализация сервера...")
     
     # Инициализация базы данных
     init_db()
-    print("✅ База данных инициализирована")
+    print("База данных инициализирована")
     
     # Получаем конфигурацию
     config = get_server_config()
@@ -71,18 +71,18 @@ async def lifespan(app: FastAPI):
     
     # Запускаем broadcast сервер
     if broadcast_server.start():
-        print(f"✅ Broadcast сервер запущен на порту {config.config['broadcast_port']}")
+        print(f"Broadcast сервер запущен на порту {config.config['broadcast_port']}")
     else:
-        print("⚠️ Не удалось запустить broadcast сервер")
+        print("Не удалось запустить broadcast сервер")
     
     # Запускаем фоновую задачу для проверки неактивных пользователей
     task = asyncio.create_task(check_inactive_users_periodically())
     
     print(f"\n{'='*50}")
-    print(f"🌐 Сервер {server_info['name']} запущен!")
-    print(f"📡 Адрес: http://{server_info['host']}:{server_info['port']}")
-    print(f"📊 Пользователей онлайн: {server_info['users_count']}")
-    print(f"🔒 Защита паролем: {'Да' if config.is_protected() else 'Нет'}")
+    print(f"Сервер {server_info['name']} запущен!")
+    print(f"Адрес: http://{server_info['host']}:{server_info['port']}")
+    print(f"Пользователей онлайн: {server_info['users_count']}")
+    print(f"Защита паролем: {'Да' if config.is_protected() else 'Нет'}")
     print(f"{'='*50}\n")
     
     yield
@@ -98,9 +98,9 @@ async def lifespan(app: FastAPI):
     broadcast_server = get_broadcast_server()
     if broadcast_server:
         broadcast_server.stop()
-        print("✅ Broadcast сервер остановлен")
+        print("Broadcast сервер остановлен")
     
-    print("\n🛑 Сервер остановлен")
+    print("\nСервер остановлен")
 
 
 def create_app() -> FastAPI:
@@ -178,12 +178,14 @@ def create_app() -> FastAPI:
                         except json.JSONDecodeError:
                             pass
                             
+                except WebSocketDisconnect:
+                    break
                 except Exception as e:
-                    print(f"⚠️ WebSocket error: {e}")
+                    print(f"WebSocket error: {e}")
                     break
                     
         except Exception as e:
-            print(f"⚠️ WebSocket endpoint error: {e}")
+            print(f"WebSocket endpoint error: {e}")
         finally:
             # Всегда вызываем disconnect
             try:
@@ -290,7 +292,7 @@ def parse_arguments():
 
 def main():
     """Основная функция запуска сервера"""
-    print("🚀 Local Messenger Server")
+    print("Local Messenger Server")
     print("=" * 50)
     
     # Парсим аргументы
@@ -302,12 +304,12 @@ def main():
     
     # Если сервер защищен паролем, проверяем/устанавливаем пароль
     if args.password_protected and not server_config.is_protected():
-        print("\n🔐 Настройка парольной защиты сервера...")
+        print("\nНастройка парольной защиты сервера...")
         
         if args.password:
             # Используем пароль из аргументов
             server_config.set_password(args.password)
-            print("✅ Пароль установлен из аргументов командной строки")
+            print("Пароль установлен из аргументов командной строки")
         else:
             # Запрашиваем пароль у пользователя
             import getpass
@@ -316,25 +318,25 @@ def main():
                 confirm = getpass.getpass("Подтвердите пароль: ")
                 
                 if password != confirm:
-                    print("❌ Пароли не совпадают")
+                    print("Пароли не совпадают")
                     return 1
                 
                 if not password:
-                    print("❌ Пароль не может быть пустым")
+                    print("Пароль не может быть пустым")
                     return 1
                 
                 server_config.set_password(password)
                 server_config.save_config()
-                print("✅ Пароль установлен")
+                print("Пароль установлен")
                 
             except KeyboardInterrupt:
-                print("\n🚪 Отмена запуска сервера")
+                print("\nОтмена запуска сервера")
                 return 0
     
     # Проверяем пароль если сервер защищен
     auth = get_server_auth(config_path)
     if not auth.check_and_start_server(lambda: True):
-        print("❌ Не удалось пройти аутентификацию")
+        print("Не удалось пройти аутентификацию")
         return 1
     
     # Создаем и запускаем приложение
@@ -344,9 +346,9 @@ def main():
     host = server_config.config["host"]
     port = server_config.config["port"]
     
-    print(f"\n🌐 Запуск сервера на {host}:{port}")
-    print("📡 Ожидание подключений...")
-    print("⚡ Нажмите Ctrl+C для остановки\n")
+    print(f"\nЗапуск сервера на {host}:{port}")
+    print("Ожидание подключений...")
+    print("Нажмите Ctrl+C для остановки\n")
     
     try:
         uvicorn.run(
@@ -356,10 +358,10 @@ def main():
             log_level="info"
         )
     except KeyboardInterrupt:
-        print("\n\n🛑 Остановка сервера...")
+        print("\n\nОстановка сервера...")
         return 0
     except Exception as e:
-        print(f"\n❌ Ошибка запуска сервера: {e}")
+        print(f"\nОшибка запуска сервера: {e}")
         return 1
 
 

@@ -9,7 +9,7 @@ from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 import requests
 import socket
 
-# Импорт модулей из новой структуры - добавляем client.
+# Импорт модулей из новой структуры
 try:
     from client.config import APP_NAME, APP_VERSION, SERVER_URL
     from client.ui.server_browser_dialog import ServerBrowserDialog
@@ -175,7 +175,7 @@ class LoginDialog(QDialog):
         """)
         buttons_layout.addWidget(self.register_btn)
         
-        # Кнопка быстрого входа
+        # Кнопка быстрого старта
         self.quick_start_btn = QPushButton("⚡ Быстрый старт")
         self.quick_start_btn.clicked.connect(self.quick_start)
         self.quick_start_btn.setMinimumHeight(45)
@@ -299,11 +299,42 @@ class LoginDialog(QDialog):
         self.show_server_browser(username, password, is_registration=True)
     
     def quick_start(self):
-        """Быстрый старт - создание локального сервера"""
+        """Быстрый старт - создание или запуск локального сервера"""
         self.status_label.setText("⚡ Быстрый старт...")
         
         try:
-            # Используем менеджер серверов для создания быстрого сервера
+            # Проверяем, есть ли уже запущенные серверы на localhost
+            running_servers = []
+            for server in self.server_manager.get_server_list():
+                if server.get('ip') in ['127.0.0.1', 'localhost'] and server.get('is_running'):
+                    running_servers.append(server)
+            
+            if running_servers:
+                # Если есть запущенный сервер, предлагаем использовать его
+                server = running_servers[0]
+                reply = QMessageBox.question(
+                    self, "⚡ Сервер уже запущен",
+                    f"Найден запущенный сервер '{server['name']}' на локальном компьютере.\n\n"
+                    "Хотите использовать его для быстрого старта?",
+                    QMessageBox.Yes | QMessageBox.No
+                )
+                
+                if reply == QMessageBox.Yes:
+                    # Используем существующий сервер
+                    username, ok = QInputDialog.getText(
+                        self, "⚡ Быстрый старт",
+                        "Введите имя пользователя для входа:",
+                        text="Гость"
+                    )
+                    
+                    if not ok or not username:
+                        return
+                    
+                    # Пытаемся зарегистрироваться или войти
+                    self.quick_login_on_server(server['ip'], server['port'], username)
+                    return
+            
+            # Если нет запущенного сервера, создаем новый
             success, message, server_data = self.server_manager.get_quick_start_server()
             
             if not success:
@@ -334,10 +365,131 @@ class LoginDialog(QDialog):
             QMessageBox.critical(self, "❌ Ошибка", f"Ошибка быстрого старта: {str(e)}")
             self.status_label.setText("❌ Ошибка быстрого старта")
     
+    def quick_login_on_server(self, ip: str, port: int, username: str):
+        """Быстрый вход на существующий сервер"""
+        try:
+            server_url = f"http://{ip}:{port}"
+            
+            # Сначала пробуем войти с паролем по умолчанию
+            response = requests.post(
+                f"{server_url}/auth/login",
+                json={"username": username, "password": "1234"},
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                # Успешный вход
+                auth_token = response.json()["access_token"]
+                
+                # Получаем данные пользователя
+                headers = {"Authorization": f"Bearer {auth_token}"}
+                response = requests.get(
+                    f"{server_url}/users/me",
+                    headers=headers,
+                    timeout=10
+                )
+                
+                if response.status_code == 200:
+                    user_data = response.json()
+                    
+                    # Создаем сессию
+                    self.auth_manager.create_session(
+                        auth_token, 
+                        user_data, 
+                        self.remember_checkbox.isChecked()
+                    )
+                    
+                    # Сохраняем сервер
+                    server_info = {
+                        'name': f"Локальный сервер ({ip})",
+                        'ip': ip,
+                        'port': port,
+                        'description': "Существующий локальный сервер",
+                        'is_password_protected': False
+                    }
+                    
+                    self.auth_manager.save_last_server(server_info)
+                    
+                    # Отправляем сигнал
+                    self.server_selected.emit({
+                        **server_info,
+                        'auth_token': auth_token,
+                        'user_data': user_data
+                    })
+                    
+                    self.accept()
+                    return
+            else:
+                # Если вход не удался, предлагаем зарегистрироваться
+                reply = QMessageBox.question(
+                    self, "❌ Ошибка входа",
+                    f"Пользователь '{username}' не найден на сервере.\n\n"
+                    "Хотите зарегистрироваться?",
+                    QMessageBox.Yes | QMessageBox.No
+                )
+                
+                if reply == QMessageBox.Yes:
+                    self.register_on_server(ip, port, username, "1234", f"Локальный сервер ({ip})")
+                    
+        except Exception as e:
+            QMessageBox.critical(self, "❌ Ошибка", f"Ошибка подключения: {str(e)}")
+    
     def register_on_server(self, ip: str, port: int, username: str, password: str, server_name: str):
         """Регистрация на сервере"""
         try:
             server_url = f"http://{ip}:{port}"
+            
+            # Проверяем, существует ли уже пользователь
+            response = requests.post(
+                f"{server_url}/auth/login",
+                json={"username": username, "password": password},
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                # Пользователь уже существует, просто входим
+                auth_token = response.json()["access_token"]
+                
+                # Получаем данные пользователя
+                headers = {"Authorization": f"Bearer {auth_token}"}
+                response = requests.get(
+                    f"{server_url}/users/me",
+                    headers=headers,
+                    timeout=10
+                )
+                
+                if response.status_code == 200:
+                    user_data = response.json()
+                    
+                    # Создаем сессию
+                    self.auth_manager.create_session(
+                        auth_token, 
+                        user_data, 
+                        self.remember_checkbox.isChecked()
+                    )
+                    
+                    # Сохраняем сервер
+                    server_info = {
+                        'name': server_name,
+                        'ip': ip,
+                        'port': port,
+                        'description': "Автоматически созданный сервер",
+                        'is_password_protected': False
+                    }
+                    
+                    self.auth_manager.save_last_server(server_info)
+                    
+                    # Отправляем сигнал
+                    self.server_selected.emit({
+                        **server_info,
+                        'auth_token': auth_token,
+                        'user_data': user_data
+                    })
+                    
+                    self.accept()
+                    return
+            
+            # Если пользователь не существует, регистрируем
             response = requests.post(
                 f"{server_url}/auth/register",
                 json={"username": username, "password": password},
@@ -345,7 +497,7 @@ class LoginDialog(QDialog):
             )
             
             if response.status_code == 200:
-                # Авторизуемся
+                # После регистрации авторизуемся
                 response = requests.post(
                     f"{server_url}/auth/login",
                     json={"username": username, "password": password},
@@ -397,9 +549,12 @@ class LoginDialog(QDialog):
             QMessageBox.warning(self, "❌ Ошибка", "Не удалось зарегистрироваться на сервере")
             self.status_label.setText("❌ Ошибка регистрации")
             
-        except Exception as e:
-            QMessageBox.critical(self, "❌ Ошибка", f"Ошибка подключения: {str(e)}")
+        except requests.exceptions.ConnectionError:
+            QMessageBox.critical(self, "❌ Ошибка", f"Не удалось подключиться к серверу {server_name}")
             self.status_label.setText("❌ Ошибка подключения")
+        except Exception as e:
+            QMessageBox.critical(self, "❌ Ошибка", f"Ошибка: {str(e)}")
+            self.status_label.setText("❌ Ошибка")
     
     def show_server_browser(self, username: str = "", password: str = "", is_registration: bool = False):
         """Показать диалог выбора сервера"""
@@ -462,7 +617,7 @@ class LoginDialog(QDialog):
                 timeout=10
             )
             
-            print(f"🔧 Login status: {response.status_code}")
+            print(f"Login status: {response.status_code}")
             
             if response.status_code == 200:
                 try:
