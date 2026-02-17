@@ -37,4 +37,5 @@ echo "Селенков/Задание_*/достижения.db" >> .gitignore
 echo "Селенков/Задание_*/educational_planner.db" >> .gitignore
 messenger/client/config.json
 messenger/server/server_config.json
+messenger/messenger.db
 # Добавьте другие бинарные/временные файлы по мере необходимости
