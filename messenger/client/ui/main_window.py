@@ -15,12 +15,12 @@ import sys
 # Импорт модулей из новой структуры
 try:
     from config import SERVER_URL, APP_NAME, APP_VERSION, update_server_config
-    from ui.chat_widget import ChatWidget
-    from ui.settings_dialog import SettingsDialog
+    from client.ui.chat_widget import ChatWidget
+    from client.ui.settings_dialog import SettingsDialog
     from client.auth_manager import get_auth_manager
-    from utils.theme_manager import get_theme_manager
-    from utils.notifications import get_notification_manager
-    from models.user import User
+    from client.utils.theme_manager import get_theme_manager
+    from client.utils.notifications import get_notification_manager
+    from client.models.user import User
 except ImportError as e:
     print(f"Ошибка импорта в main_window.py: {e}")
 

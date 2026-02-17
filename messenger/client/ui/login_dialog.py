@@ -2,7 +2,7 @@
 Диалог авторизации и выбора сервера.
 """
 
-from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, 
+from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QWidget,
                              QLineEdit, QPushButton, QMessageBox, QInputDialog,
                              QCheckBox, QFrame, QProgressBar)
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
@@ -14,7 +14,7 @@ try:
     from client.config import APP_NAME, APP_VERSION, SERVER_URL
     from client.ui.server_browser_dialog import ServerBrowserDialog
     from client.auth_manager import get_auth_manager
-    from network.server_discovery import quick_discover_servers
+    from client.network.server_discovery import quick_discover_servers
     from client.server_manager import get_server_manager
 except ImportError as e:
     print(f"Ошибка импорта в login_dialog.py: {e}")
