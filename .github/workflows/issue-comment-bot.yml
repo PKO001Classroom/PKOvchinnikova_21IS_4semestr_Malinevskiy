@@ -1,0 +1,51 @@
+name: Issue Comment Bot
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+
+jobs:
+  dispatch-to-master:
+    if: ${{ github.event.issue.pull_request == null }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send repository_dispatch to master repo
+        uses: actions/github-script@v7
+        env:
+          MASTER_OWNER: ${{ vars.MASTER_OWNER }}
+          MASTER_REPO: ${{ vars.MASTER_REPO }}
+        with:
+          github-token: ${{ secrets.ORG_BOT_PAT }}
+          script: |
+            const owner = process.env.MASTER_OWNER || 'PKO001Classroom';
+            const repo = process.env.MASTER_REPO || 'EDUAI2026AgentMaster001';
+
+            const payload = {
+              action: context.payload.action,
+              repository: {
+                owner: { login: context.repo.owner },
+                name: context.repo.repo
+              },
+              issue: {
+                number: context.payload.issue?.number,
+                pull_request: context.payload.issue?.pull_request || null
+              },
+              comment: {
+                body: context.payload.comment?.body || '',
+                html_url: context.payload.comment?.html_url || '',
+                user: {
+                  login: context.payload.comment?.user?.login || '',
+                  type: context.payload.comment?.user?.type || ''
+                }
+              }
+            };
+
+            await github.request('POST /repos/{owner}/{repo}/dispatches', {
+              owner,
+              repo,
+              event_type: 'issue_comment_event',
+              client_payload: payload,
+            });
