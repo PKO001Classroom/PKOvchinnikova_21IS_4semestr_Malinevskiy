@@ -14,6 +14,7 @@ from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QThread, pyqtSlot
 from PyQt5.QtGui import QFont, QColor, QPalette, QIcon, QPixmap
 import socket
 import time
+from client.ui.network_selector_dialog import NetworkSelectorDialog
 from typing import Optional, List
 
 # Импорт модулей из новой структуры - добавляем client.
@@ -35,7 +36,7 @@ class DiscoveryWorker(QThread):
     Выполняет поиск в фоне чтобы не блокировать UI.
     """
     servers_found = pyqtSignal(list)
-    discovery_progress = pyqtSignal(int)
+    discovery_progress = pyqtSignal(int, int, str)  # current, total, message
     discovery_finished = pyqtSignal()
     discovery_error = pyqtSignal(str)
     
@@ -44,33 +45,55 @@ class DiscoveryWorker(QThread):
         self.quick_mode = quick_mode
         self.discovery = get_discovery_instance()
         self.is_running = True
+        self.networks = None  # Список сетей для сканирования
         
     def run(self):
         """Основной метод потока"""
         try:
-            # Поиск серверов
-            self.discovery_progress.emit(10)
+            self.discovery_progress.emit(0, 1, "Подготовка...")
             
-            if self.quick_mode:
-                servers = quick_discover_servers()
+            if self.networks:
+                # Поиск с выбором сетей
+                total_networks = len(self.networks)
+                
+                def progress_callback(current, total, message):
+                    if self.is_running:
+                        self.discovery_progress.emit(current, total, message)
+                
+                # Устанавливаем callback для broadcast клиента
+                self.discovery.broadcast_client.progress_callback = progress_callback
+                
+                if self.quick_mode:
+                    servers = self.discovery.quick_discover_servers(self.networks)
+                else:
+                    servers = self.discovery.discover_servers(self.networks)
             else:
-                servers = self.discovery.discover()
+                # Стандартный поиск
+                self.discovery_progress.emit(0, 1, "Поиск серверов...")
+                
+                if self.quick_mode:
+                    servers = self.discovery.quick_discover_servers()
+                else:
+                    servers = self.discovery.discover_servers()
+                
+                self.discovery_progress.emit(1, 1, f"Найдено {len(servers)} серверов")
             
-            self.discovery_progress.emit(90)
-            
-            # Отправляем результат в UI поток
-            self.servers_found.emit(servers)
-            self.discovery_progress.emit(100)
-            
+            if self.is_running:
+                self.servers_found.emit(servers)
+                
         except Exception as e:
-            self.discovery_error.emit(str(e))
+            if self.is_running:
+                self.discovery_error.emit(str(e))
         finally:
             self.discovery_finished.emit()
             
     def stop(self):
         """Остановка потока"""
         self.is_running = False
+        if hasattr(self.discovery, 'broadcast_client'):
+            self.discovery.broadcast_client.stop_discovery()
         self.wait()
+
 
 
 class ServerBrowserDialog(QDialog):
@@ -200,12 +223,64 @@ class ServerBrowserDialog(QDialog):
         
         # Начинаем с экрана загрузки
         self.stacked_widget.setCurrentWidget(self.loading_screen)
+    def show_network_selector(self):
+        """Показать диалог выбора сети"""
+        dialog = NetworkSelectorDialog(self)
+        
+        def on_networks_selected(networks):
+            self.selected_networks = networks
+            self.status_label.setText(f"Выбрано сетей: {len(networks)}")
+            # Запускаем сканирование с выбранными сетями
+            self.start_discovery_with_networks(networks)
+        
+        dialog.networks_selected.connect(on_networks_selected)
+        dialog.exec_()
+
+    def start_discovery_with_networks(self, networks: List[Dict]):
+        """Запуск поиска с выбранными сетями"""
+        self.stacked_widget.setCurrentWidget(self.loading_screen)
+        self.loading_progress.setValue(0)
+        self.loading_progress.setFormat("Подготовка... 0%")
+        
+        self.status_label.setText(f"Сканирование {len(networks)} сетей...")
+        
+        # Обновляем информацию о сетях
+        network_info = "\n".join([f"  • {n['cidr']} ({n['ip']})" for n in networks[:3]])
+        if len(networks) > 3:
+            network_info += f"\n  • и еще {len(networks) - 3} сетей"
+        
+        self.scan_info_label.setText(f"Сканируемые сети:\n{network_info}")
+        
+        # Отключаем кнопки
+        self.refresh_btn.setEnabled(False)
+        self.connect_btn.setEnabled(False)
+        
+        # Запускаем поток поиска с выбранными сетями
+        self.discovery_worker = DiscoveryWorker(quick_mode=False)
+        self.discovery_worker.networks = networks
+        self.discovery_worker.servers_found.connect(self.on_servers_found)
+        self.discovery_worker.discovery_progress.connect(self.update_discovery_progress)
+        self.discovery_worker.discovery_error.connect(self.on_discovery_error)
+        self.discovery_worker.finished.connect(self.on_discovery_finished)
+        self.discovery_worker.start()
+
+    def update_discovery_progress(self, current: int, total: int, message: str):
+        """Обновление прогресса сканирования"""
+        if total > 0:
+            progress = int((current / total) * 100)
+            self.loading_progress.setValue(progress)
+            self.loading_progress.setFormat(f"{message} {progress}%")
+            
+            # Обновляем информацию о найденных серверах
+            if hasattr(self, 'found_servers'):
+                self.status_label.setText(f"Найдено серверов: {len(self.found_servers)}")
         
     def create_loading_screen(self) -> QWidget:
         """Создание экрана загрузки"""
         widget = QWidget()
         layout = QVBoxLayout()
         layout.setAlignment(Qt.AlignCenter)
+        layout.setSpacing(20)
         
         # Анимация загрузки
         loading_label = QLabel("🔍 Поиск серверов в сети...")
@@ -220,13 +295,13 @@ class ServerBrowserDialog(QDialog):
         self.loading_progress.setRange(0, 100)
         self.loading_progress.setTextVisible(True)
         self.loading_progress.setFormat("Поиск... %p%")
+        self.loading_progress.setMinimumWidth(400)
         self.loading_progress.setStyleSheet("""
             QProgressBar {
                 border: 1px solid #ccc;
                 border-radius: 5px;
                 text-align: center;
                 height: 25px;
-                width: 300px;
             }
             QProgressBar::chunk {
                 background-color: #4CAF50;
@@ -235,14 +310,46 @@ class ServerBrowserDialog(QDialog):
         """)
         layout.addWidget(self.loading_progress, 0, Qt.AlignCenter)
         
+        # Информация о сканировании
+        self.scan_info_label = QLabel("")
+        self.scan_info_label.setAlignment(Qt.AlignCenter)
+        self.scan_info_label.setStyleSheet("color: #666; font-size: 12px; margin-top: 10px;")
+        self.scan_info_label.setWordWrap(True)
+        layout.addWidget(self.scan_info_label)
+        
+        # Кнопка остановки
+        self.stop_scan_btn = QPushButton("⏹️ Остановить сканирование")
+        self.stop_scan_btn.clicked.connect(self.stop_discovery)
+        self.stop_scan_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #f44336;
+                color: white;
+                padding: 8px 16px;
+                border-radius: 4px;
+                border: none;
+                margin-top: 10px;
+            }
+            QPushButton:hover {
+                background-color: #d32f2f;
+            }
+        """)
+        layout.addWidget(self.stop_scan_btn, 0, Qt.AlignCenter)
+        
         # Подсказка
-        hint_label = QLabel("Это может занять несколько секунд")
+        hint_label = QLabel("Это может занять несколько секунд в зависимости от количества сетей")
         hint_label.setAlignment(Qt.AlignCenter)
         hint_label.setStyleSheet("color: #888; font-style: italic; margin-top: 20px;")
         layout.addWidget(hint_label)
         
         widget.setLayout(layout)
         return widget
+    
+    def stop_discovery(self):
+        """Остановка поиска серверов"""
+        if self.discovery_worker and self.discovery_worker.isRunning():
+            self.discovery_worker.stop()
+            self.status_label.setText("⏹️ Поиск остановлен пользователем")
+            self.stacked_widget.setCurrentWidget(self.main_screen)
         
     def create_main_screen(self) -> QWidget:
         """Создание основного экрана"""
@@ -424,7 +531,60 @@ class ServerBrowserDialog(QDialog):
             }
         """)
         refresh_layout.addWidget(self.refresh_btn)
-        
+
+        # В методе create_left_panel, после создания кнопки обновления
+        # добавьте кнопку выбора сети
+
+        # Кнопка обновления
+        refresh_layout = QHBoxLayout()
+
+        self.refresh_btn = QPushButton("🔄 Обновить список")
+        self.refresh_btn.setObjectName("refreshBtn")
+        self.refresh_btn.clicked.connect(self.start_discovery)
+        self.refresh_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #2196F3;
+                color: white;
+                padding: 10px 20px;
+                border-radius: 6px;
+                font-weight: bold;
+                border: none;
+                font-size: 13px;
+            }
+            QPushButton:hover {
+                background-color: #1976d2;
+            }
+            QPushButton:disabled {
+                background-color: #cccccc;
+                color: #666666;
+            }
+        """)
+        refresh_layout.addWidget(self.refresh_btn)
+
+        # Новая кнопка выбора сети
+        self.network_select_btn = QPushButton("🌐 Выбрать сети")
+        self.network_select_btn.setObjectName("networkBtn")
+        self.network_select_btn.clicked.connect(self.show_network_selector)
+        self.network_select_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #9C27B0;
+                color: white;
+                padding: 10px 20px;
+                border-radius: 6px;
+                font-weight: bold;
+                border: none;
+                font-size: 13px;
+            }
+            QPushButton:hover {
+                background-color: #7B1FA2;
+            }
+            QPushButton:disabled {
+                background-color: #cccccc;
+                color: #666666;
+            }
+        """)
+        refresh_layout.addWidget(self.network_select_btn)
+                
         layout.addLayout(refresh_layout)
         panel.setLayout(layout)
         
@@ -838,6 +998,22 @@ class ServerBrowserDialog(QDialog):
     def on_servers_found(self, servers: List[ServerInfo]):
         """Обработка найденных серверов"""
         self.found_servers = servers
+        
+        # Группируем серверы по сетям
+        servers_by_network = {}
+        for server in servers:
+            network = getattr(server, 'discovery_network', 'unknown')
+            if network not in servers_by_network:
+                servers_by_network[network] = []
+            servers_by_network[network].append(server)
+        
+        # Выводим статистику
+        print(f"\n📊 Результаты сканирования:")
+        print(f"   Всего найдено серверов: {len(servers)}")
+        for network, net_servers in servers_by_network.items():
+            online = sum(1 for s in net_servers if s.is_online)
+            print(f"   • {network}: {len(net_servers)} серверов ({online} онлайн)")
+        
         self.update_server_list()
         self.update_stats()
         
