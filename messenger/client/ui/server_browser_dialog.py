@@ -8,24 +8,25 @@ from PyQt5.QtWidgets import (
     QPushButton, QLabel, QMessageBox, QProgressBar, QSplitter,
     QFrame, QGroupBox, QFormLayout, QLineEdit, QTextEdit,
     QCheckBox, QInputDialog, QTabWidget, QWidget, QGridLayout,
-    QApplication, QStackedWidget
+    QApplication, QStackedWidget, QComboBox
 )
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QThread, pyqtSlot
 from PyQt5.QtGui import QFont, QColor, QPalette, QIcon, QPixmap
 import socket
 import time
-from client.ui.network_selector_dialog import NetworkSelectorDialog
-from typing import Optional, List
+import ipaddress
+import subprocess
+import re
+import platform
+from typing import Optional, List, Dict, Any, Tuple
 
 # Импорт модулей из новой структуры - добавляем client.
 try:
-    
     from client.config import APP_NAME, APP_VERSION
     from client.network.server_discovery import get_discovery_instance, quick_discover_servers
     from client.server_manager import get_server_manager
     from client.models.server_info import ServerInfo  # Импортируем ServerInfo
     from client.auth_manager import get_auth_manager
-    from client.ui.server_create_dialog import ServerCreateDialog
 except ImportError as e:
     print(f"Ошибка импорта в server_browser_dialog.py: {e}")
 
@@ -39,6 +40,7 @@ class DiscoveryWorker(QThread):
     discovery_progress = pyqtSignal(int, int, str)  # current, total, message
     discovery_finished = pyqtSignal()
     discovery_error = pyqtSignal(str)
+    ip_scanned = pyqtSignal(str, bool)  # ip, found
     
     def __init__(self, quick_mode: bool = False):
         super().__init__()
@@ -46,6 +48,8 @@ class DiscoveryWorker(QThread):
         self.discovery = get_discovery_instance()
         self.is_running = True
         self.networks = None  # Список сетей для сканирования
+        self.scanned_ips = []
+        self.found_servers = []
         
     def run(self):
         """Основной метод потока"""
@@ -59,9 +63,16 @@ class DiscoveryWorker(QThread):
                 def progress_callback(current, total, message):
                     if self.is_running:
                         self.discovery_progress.emit(current, total, message)
+                        # Извлекаем IP из сообщения если есть
+                        if ":" in message:
+                            ip_part = message.split(":")[-1].strip()
+                            if ip_part and ip_part not in self.scanned_ips:
+                                self.scanned_ips.append(ip_part)
+                                self.ip_scanned.emit(ip_part, False)
                 
                 # Устанавливаем callback для broadcast клиента
-                self.discovery.broadcast_client.progress_callback = progress_callback
+                if hasattr(self.discovery, 'broadcast_client'):
+                    self.discovery.broadcast_client.progress_callback = progress_callback
                 
                 if self.quick_mode:
                     servers = self.discovery.quick_discover_servers(self.networks)
@@ -79,6 +90,7 @@ class DiscoveryWorker(QThread):
                 self.discovery_progress.emit(1, 1, f"Найдено {len(servers)} серверов")
             
             if self.is_running:
+                self.found_servers = servers
                 self.servers_found.emit(servers)
                 
         except Exception as e:
@@ -94,6 +106,369 @@ class DiscoveryWorker(QThread):
             self.discovery.broadcast_client.stop_discovery()
         self.wait()
 
+
+class NetworkScanner:
+    """Класс для сканирования сетей и получения информации о них без использования netifaces"""
+    
+    @staticmethod
+    def get_network_interfaces_windows() -> List[Dict[str, Any]]:
+        """Получение сетевых интерфейсов в Windows через ipconfig"""
+        interfaces = []
+        
+        try:
+            # Запускаем ipconfig
+            result = subprocess.run(['ipconfig'], capture_output=True, text=True, encoding='cp866')
+            output = result.stdout
+            
+            # Парсим вывод ipconfig
+            lines = output.split('\n')
+            current_iface = {}
+            
+            for line in lines:
+                line = line.strip()
+                
+                # Начало нового интерфейса
+                if 'адаптер' in line.lower() or 'adapter' in line.lower():
+                    if current_iface and 'ip' in current_iface:
+                        interfaces.append(current_iface)
+                    current_iface = {'name': line.strip()}
+                
+                # IPv4 адрес
+                elif 'IPv4' in line or 'ipv4' in line.lower():
+                    match = re.search(r'(\d+\.\d+\.\d+\.\d+)', line)
+                    if match:
+                        current_iface['ip'] = match.group(1)
+                
+                # Маска подсети
+                elif 'маска' in line.lower() or 'mask' in line.lower():
+                    match = re.search(r'(\d+\.\d+\.\d+\.\d+)', line)
+                    if match:
+                        current_iface['netmask'] = match.group(1)
+            
+            # Добавляем последний интерфейс
+            if current_iface and 'ip' in current_iface:
+                interfaces.append(current_iface)
+                
+        except Exception as e:
+            print(f"Ошибка получения сетевых интерфейсов Windows: {e}")
+            
+        return interfaces
+    
+    @staticmethod
+    def get_network_interfaces_linux() -> List[Dict[str, Any]]:
+        """Получение сетевых интерфейсов в Linux через ifconfig или ip addr"""
+        interfaces = []
+        
+        try:
+            # Пробуем ip addr
+            result = subprocess.run(['ip', 'addr'], capture_output=True, text=True)
+            output = result.output
+            
+            lines = output.split('\n')
+            current_iface = {}
+            
+            for line in lines:
+                line = line.strip()
+                
+                # Начало интерфейса
+                if ': <' in line or ':' in line and not line.startswith(' '):
+                    if current_iface and 'ip' in current_iface:
+                        interfaces.append(current_iface)
+                    iface_name = line.split(':')[1].strip()
+                    current_iface = {'name': iface_name}
+                
+                # IPv4 адрес
+                elif 'inet ' in line and not 'inet6' in line:
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        ip_net = parts[1].split('/')
+                        current_iface['ip'] = ip_net[0]
+                        if len(ip_net) > 1:
+                            # Конвертируем CIDR в маску
+                            cidr = int(ip_net[1])
+                            mask = (0xffffffff >> (32 - cidr)) << (32 - cidr)
+                            current_iface['netmask'] = '.'.join([str((mask >> (8*i)) & 0xff) for i in range(3, -1, -1)])
+            
+            # Добавляем последний интерфейс
+            if current_iface and 'ip' in current_iface:
+                interfaces.append(current_iface)
+                
+        except Exception as e:
+            print(f"Ошибка получения сетевых интерфейсов Linux: {e}")
+            
+        return interfaces
+    
+    @staticmethod
+    def get_network_interfaces_mac() -> List[Dict[str, Any]]:
+        """Получение сетевых интерфейсов в macOS через ifconfig"""
+        interfaces = []
+        
+        try:
+            result = subprocess.run(['ifconfig'], capture_output=True, text=True)
+            output = result.output
+            
+            lines = output.split('\n')
+            current_iface = {}
+            
+            for line in lines:
+                line = line.strip()
+                
+                # Начало интерфейса
+                if ': flags=' in line:
+                    if current_iface and 'ip' in current_iface:
+                        interfaces.append(current_iface)
+                    iface_name = line.split(':')[0]
+                    current_iface = {'name': iface_name}
+                
+                # inet addr
+                elif 'inet ' in line:
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        current_iface['ip'] = parts[1]
+                    if 'netmask' in line:
+                        for i, part in enumerate(parts):
+                            if part == 'netmask' and i + 1 < len(parts):
+                                netmask_hex = parts[i+1]
+                                # Конвертируем hex в десятичный формат
+                                if netmask_hex.startswith('0x'):
+                                    mask_int = int(netmask_hex, 16)
+                                    current_iface['netmask'] = '.'.join([
+                                        str((mask_int >> 24) & 0xff),
+                                        str((mask_int >> 16) & 0xff),
+                                        str((mask_int >> 8) & 0xff),
+                                        str(mask_int & 0xff)
+                                    ])
+            
+            # Добавляем последний интерфейс
+            if current_iface and 'ip' in current_iface:
+                interfaces.append(current_iface)
+                
+        except Exception as e:
+            print(f"Ошибка получения сетевых интерфейсов macOS: {e}")
+            
+        return interfaces
+    
+    @staticmethod
+    def get_network_interfaces() -> List[Dict[str, Any]]:
+        """Получение списка сетевых интерфейсов в зависимости от ОС"""
+        system = platform.system()
+        
+        if system == 'Windows':
+            interfaces = NetworkScanner.get_network_interfaces_windows()
+        elif system == 'Linux':
+            interfaces = NetworkScanner.get_network_interfaces_linux()
+        elif system == 'Darwin':  # macOS
+            interfaces = NetworkScanner.get_network_interfaces_mac()
+        else:
+            interfaces = []
+        
+        # Фильтруем интерфейсы и добавляем CIDR
+        result = []
+        for iface in interfaces:
+            ip = iface.get('ip', '')
+            netmask = iface.get('netmask', '')
+            
+            # Пропускаем loopback
+            if ip.startswith('127.'):
+                continue
+                
+            # Если нет маски, пробуем определить по классу IP
+            if not netmask and ip:
+                # Определяем маску по классу IP
+                first_octet = int(ip.split('.')[0])
+                if first_octet < 128:
+                    netmask = '255.0.0.0'
+                elif first_octet < 192:
+                    netmask = '255.255.0.0'
+                else:
+                    netmask = '255.255.255.0'
+            
+            # Вычисляем сеть
+            if ip and netmask:
+                try:
+                    # Конвертируем IP и маску в числа
+                    ip_int = NetworkScanner.ip_to_int(ip)
+                    mask_int = NetworkScanner.ip_to_int(netmask)
+                    network_int = ip_int & mask_int
+                    network = NetworkScanner.int_to_ip(network_int)
+                    
+                    # Определяем CIDR
+                    cidr = bin(mask_int).count('1')
+                    
+                    result.append({
+                        'name': iface.get('name', 'Неизвестный интерфейс'),
+                        'ip': ip,
+                        'netmask': netmask,
+                        'network': f"{network}/{cidr}",
+                        'cidr': f"{network}/{cidr}"
+                    })
+                except Exception as e:
+                    print(f"Ошибка вычисления сети для {ip}: {e}")
+        
+        return result
+    
+    @staticmethod
+    def ip_to_int(ip: str) -> int:
+        """Конвертация IP адреса в число"""
+        parts = ip.split('.')
+        return (int(parts[0]) << 24) + (int(parts[1]) << 16) + (int(parts[2]) << 8) + int(parts[3])
+    
+    @staticmethod
+    def int_to_ip(ip_int: int) -> str:
+        """Конвертация числа в IP адрес"""
+        return f"{(ip_int >> 24) & 0xff}.{(ip_int >> 16) & 0xff}.{(ip_int >> 8) & 0xff}.{ip_int & 0xff}"
+    
+    @staticmethod
+    def get_all_networks() -> List[Dict[str, Any]]:
+        """Получение всех доступных сетей"""
+        return NetworkScanner.get_network_interfaces()
+
+
+class NetworkSelectionDialog(QDialog):
+    """Диалог выбора сети для сканирования"""
+    
+    networks_selected = pyqtSignal(list)
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("🌐 Выбор сети для сканирования")
+        self.setMinimumWidth(500)
+        self.setMinimumHeight(400)
+        
+        layout = QVBoxLayout()
+        
+        # Заголовок
+        title = QLabel("Выберите сети для сканирования")
+        title.setStyleSheet("font-size: 14px; font-weight: bold; padding: 10px;")
+        layout.addWidget(title)
+        
+        # Информация
+        info = QLabel("Можно выбрать несколько сетей. Сканирование всех сетей может занять время.")
+        info.setWordWrap(True)
+        info.setStyleSheet("color: #666; padding: 5px;")
+        layout.addWidget(info)
+        
+        # Список сетей
+        self.network_list = QListWidget()
+        self.network_list.setSelectionMode(QListWidget.MultiSelection)
+        self.network_list.setStyleSheet("""
+            QListWidget {
+                border: 1px solid #ccc;
+                border-radius: 5px;
+                padding: 5px;
+            }
+            QListWidget::item {
+                padding: 10px;
+                border-bottom: 1px solid #eee;
+            }
+            QListWidget::item:selected {
+                background-color: #e3f2fd;
+            }
+        """)
+        
+        # Загружаем сети
+        self.networks = NetworkScanner.get_all_networks()
+        
+        if not self.networks:
+            # Если не удалось определить сети, добавляем стандартные
+            item = QListWidgetItem("⚠️ Не удалось определить сети автоматически")
+            item.setFlags(Qt.NoItemFlags)
+            self.network_list.addItem(item)
+            
+            # Добавляем стандартные варианты
+            default_networks = [
+                {"name": "Локальная сеть 192.168.1.x", "cidr": "192.168.1.0/24", "ip": "192.168.1.1", "netmask": "255.255.255.0"},
+                {"name": "Локальная сеть 192.168.0.x", "cidr": "192.168.0.0/24", "ip": "192.168.0.1", "netmask": "255.255.255.0"},
+                {"name": "Локальная сеть 10.0.0.x", "cidr": "10.0.0.0/24", "ip": "10.0.0.1", "netmask": "255.255.255.0"},
+                {"name": "Локальная сеть 172.16.x.x", "cidr": "172.16.0.0/16", "ip": "172.16.0.1", "netmask": "255.255.0.0"},
+            ]
+            
+            for net in default_networks:
+                item = QListWidgetItem(f"🌐 {net['name']}")
+                item.setData(Qt.UserRole, net)
+                item.setSelected(True)
+                self.network_list.addItem(item)
+        else:
+            for net in self.networks:
+                item = QListWidgetItem(f"🌐 {net['name']} - {net['cidr']}")
+                item.setData(Qt.UserRole, net)
+                item.setSelected(True)  # По умолчанию все выбраны
+                self.network_list.addItem(item)
+                
+        layout.addWidget(self.network_list)
+        
+        # Кнопки
+        btn_layout = QHBoxLayout()
+        
+        select_all_btn = QPushButton("✅ Выбрать все")
+        select_all_btn.clicked.connect(self.select_all)
+        btn_layout.addWidget(select_all_btn)
+        
+        clear_all_btn = QPushButton("❌ Очистить все")
+        clear_all_btn.clicked.connect(self.clear_all)
+        btn_layout.addWidget(clear_all_btn)
+        
+        layout.addLayout(btn_layout)
+        
+        # Кнопки OK/Cancel
+        button_box = QHBoxLayout()
+        
+        cancel_btn = QPushButton("Отмена")
+        cancel_btn.clicked.connect(self.reject)
+        cancel_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #f44336;
+                color: white;
+                padding: 10px;
+                border-radius: 5px;
+            }
+        """)
+        button_box.addWidget(cancel_btn)
+        
+        button_box.addStretch()
+        
+        ok_btn = QPushButton("Сканировать")
+        ok_btn.clicked.connect(self.accept_selection)
+        ok_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #4CAF50;
+                color: white;
+                padding: 10px 20px;
+                border-radius: 5px;
+                font-weight: bold;
+            }
+        """)
+        button_box.addWidget(ok_btn)
+        
+        layout.addLayout(button_box)
+        
+        self.setLayout(layout)
+        
+    def select_all(self):
+        """Выбрать все сети"""
+        for i in range(self.network_list.count()):
+            item = self.network_list.item(i)
+            if item.flags() & Qt.ItemIsSelectable:
+                item.setSelected(True)
+                
+    def clear_all(self):
+        """Очистить выбор"""
+        self.network_list.clearSelection()
+        
+    def accept_selection(self):
+        """Подтверждение выбора"""
+        selected = []
+        for item in self.network_list.selectedItems():
+            net_data = item.data(Qt.UserRole)
+            if net_data:
+                selected.append(net_data)
+                
+        if not selected:
+            QMessageBox.warning(self, "Предупреждение", "Выберите хотя бы одну сеть")
+            return
+            
+        self.networks_selected.emit(selected)
+        self.accept()
 
 
 class ServerBrowserDialog(QDialog):
@@ -123,6 +498,7 @@ class ServerBrowserDialog(QDialog):
         self.found_servers: List[ServerInfo] = []
         self.saved_servers: List[dict] = []
         self.selected_server: Optional[ServerInfo] = None
+        self.scanned_ips = []
         
         # UI элементы
         self.servers_list: Optional[QListWidget] = None
@@ -223,13 +599,17 @@ class ServerBrowserDialog(QDialog):
         
         # Начинаем с экрана загрузки
         self.stacked_widget.setCurrentWidget(self.loading_screen)
+        
     def show_network_selector(self):
         """Показать диалог выбора сети"""
-        dialog = NetworkSelectorDialog(self)
+        dialog = NetworkSelectionDialog(self)
         
         def on_networks_selected(networks):
             self.selected_networks = networks
-            self.status_label.setText(f"Выбрано сетей: {len(networks)}")
+            network_names = ", ".join([n['cidr'] for n in networks[:3]])
+            if len(networks) > 3:
+                network_names += f" и еще {len(networks)-3}"
+            self.status_label.setText(f"Выбрано сетей: {len(networks)} ({network_names})")
             # Запускаем сканирование с выбранными сетями
             self.start_discovery_with_networks(networks)
         
@@ -245,11 +625,15 @@ class ServerBrowserDialog(QDialog):
         self.status_label.setText(f"Сканирование {len(networks)} сетей...")
         
         # Обновляем информацию о сетях
-        network_info = "\n".join([f"  • {n['cidr']} ({n['ip']})" for n in networks[:3]])
-        if len(networks) > 3:
-            network_info += f"\n  • и еще {len(networks) - 3} сетей"
+        network_info = "\n".join([f"  • {n['cidr']} ({n['ip']})" for n in networks[:5]])
+        if len(networks) > 5:
+            network_info += f"\n  • и еще {len(networks) - 5} сетей"
         
         self.scan_info_label.setText(f"Сканируемые сети:\n{network_info}")
+        
+        # Очищаем список найденных IP
+        self.scanned_ips = []
+        self.ip_list_label.setText("Найденные IP: ожидание...")
         
         # Отключаем кнопки
         self.refresh_btn.setEnabled(False)
@@ -273,7 +657,18 @@ class ServerBrowserDialog(QDialog):
             
             # Обновляем информацию о найденных серверах
             if hasattr(self, 'found_servers'):
-                self.status_label.setText(f"Найдено серверов: {len(self.found_servers)}")
+                self.status_label.setText(f"Найдено серверов: {len(self.found_servers)} | Сканировано: {current}/{total}")
+                
+            # Добавляем информацию о сканируемом IP
+            if ":" in message:
+                ip_part = message.split(":")[-1].strip()
+                if ip_part and ip_part not in self.scanned_ips:
+                    self.scanned_ips.append(ip_part)
+                    if len(self.scanned_ips) > 20:
+                        display_ips = self.scanned_ips[:20] + ["..."]
+                    else:
+                        display_ips = self.scanned_ips
+                    self.ip_list_label.setText(f"Сканировано IP: {', '.join(display_ips)}")
         
     def create_loading_screen(self) -> QWidget:
         """Создание экрана загрузки"""
@@ -316,6 +711,22 @@ class ServerBrowserDialog(QDialog):
         self.scan_info_label.setStyleSheet("color: #666; font-size: 12px; margin-top: 10px;")
         self.scan_info_label.setWordWrap(True)
         layout.addWidget(self.scan_info_label)
+        
+        # Список найденных IP
+        ip_group = QGroupBox("📡 Сканируемые IP")
+        ip_group.setStyleSheet("""
+            QGroupBox {
+                font-weight: bold;
+                margin-top: 10px;
+            }
+        """)
+        ip_layout = QVBoxLayout()
+        self.ip_list_label = QLabel("Ожидание сканирования...")
+        self.ip_list_label.setWordWrap(True)
+        self.ip_list_label.setStyleSheet("color: #2196F3; font-size: 11px;")
+        ip_layout.addWidget(self.ip_list_label)
+        ip_group.setLayout(ip_layout)
+        layout.addWidget(ip_group)
         
         # Кнопка остановки
         self.stop_scan_btn = QPushButton("⏹️ Остановить сканирование")
@@ -507,8 +918,9 @@ class ServerBrowserDialog(QDialog):
         
         layout.addWidget(self.tab_widget)
         
-        # Кнопка обновления
-        refresh_layout = QHBoxLayout()
+        # Кнопки обновления и выбора сети
+        btn_layout = QHBoxLayout()
+        
         self.refresh_btn = QPushButton("🔄 Обновить список")
         self.refresh_btn.setObjectName("refreshBtn")
         self.refresh_btn.clicked.connect(self.start_discovery)
@@ -530,38 +942,8 @@ class ServerBrowserDialog(QDialog):
                 color: #666666;
             }
         """)
-        refresh_layout.addWidget(self.refresh_btn)
-
-        # В методе create_left_panel, после создания кнопки обновления
-        # добавьте кнопку выбора сети
-
-        # Кнопка обновления
-        refresh_layout = QHBoxLayout()
-
-        self.refresh_btn = QPushButton("🔄 Обновить список")
-        self.refresh_btn.setObjectName("refreshBtn")
-        self.refresh_btn.clicked.connect(self.start_discovery)
-        self.refresh_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #2196F3;
-                color: white;
-                padding: 10px 20px;
-                border-radius: 6px;
-                font-weight: bold;
-                border: none;
-                font-size: 13px;
-            }
-            QPushButton:hover {
-                background-color: #1976d2;
-            }
-            QPushButton:disabled {
-                background-color: #cccccc;
-                color: #666666;
-            }
-        """)
-        refresh_layout.addWidget(self.refresh_btn)
-
-        # Новая кнопка выбора сети
+        btn_layout.addWidget(self.refresh_btn)
+        
         self.network_select_btn = QPushButton("🌐 Выбрать сети")
         self.network_select_btn.setObjectName("networkBtn")
         self.network_select_btn.clicked.connect(self.show_network_selector)
@@ -583,11 +965,42 @@ class ServerBrowserDialog(QDialog):
                 color: #666666;
             }
         """)
-        refresh_layout.addWidget(self.network_select_btn)
-                
-        layout.addLayout(refresh_layout)
-        panel.setLayout(layout)
+        btn_layout.addWidget(self.network_select_btn)
         
+        # Кнопка запуска сохраненного сервера
+        self.start_saved_btn = QPushButton("▶️ Запустить выбранный")
+        self.start_saved_btn.setObjectName("startSavedBtn")
+        self.start_saved_btn.clicked.connect(self.on_start_server_clicked)
+        self.start_saved_btn.setEnabled(False)
+        self.start_saved_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #4CAF50;
+                color: white;
+                padding: 10px 20px;
+                border-radius: 6px;
+                font-weight: bold;
+                border: none;
+                font-size: 13px;
+            }
+            QPushButton:hover {
+                background-color: #45a049;
+            }
+            QPushButton:disabled {
+                background-color: #cccccc;
+                color: #666666;
+            }
+        """)
+        btn_layout.addWidget(self.start_saved_btn)
+        
+        layout.addLayout(btn_layout)
+        
+        # Информация о текущем сканировании
+        self.scan_info_panel = QLabel("")
+        self.scan_info_panel.setStyleSheet("color: #666; font-size: 11px; padding: 5px; background-color: #f5f5f5; border-radius: 4px;")
+        self.scan_info_panel.setWordWrap(True)
+        layout.addWidget(self.scan_info_panel)
+        
+        panel.setLayout(layout)
         return panel
         
     def create_right_panel(self) -> QWidget:
@@ -866,6 +1279,64 @@ class ServerBrowserDialog(QDialog):
         error_details.setStyleSheet("color: #888; margin: 20px 0;")
         layout.addWidget(error_details)
         
+        # Кнопка выбора сети
+        network_btn = QPushButton("🌐 Выбрать сеть для сканирования")
+        network_btn.clicked.connect(self.show_network_selector)
+        network_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #9C27B0;
+                color: white;
+                padding: 12px 24px;
+                border-radius: 6px;
+                font-weight: bold;
+                border: none;
+                margin: 5px;
+            }
+            QPushButton:hover {
+                background-color: #7B1FA2;
+            }
+        """)
+        layout.addWidget(network_btn, 0, Qt.AlignCenter)
+        
+        # Кнопка запуска сохраненного сервера
+        saved_btn = QPushButton("💾 Запустить сохраненный сервер")
+        saved_btn.clicked.connect(lambda: self.tab_widget.setCurrentIndex(1))
+        saved_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #4CAF50;
+                color: white;
+                padding: 12px 24px;
+                border-radius: 6px;
+                font-weight: bold;
+                border: none;
+                margin: 5px;
+            }
+            QPushButton:hover {
+                background-color: #45a049;
+            }
+        """)
+        layout.addWidget(saved_btn, 0, Qt.AlignCenter)
+        
+        # Кнопка создания сервера
+        create_btn = QPushButton("➕ Создать новый сервер")
+        create_btn.clicked.connect(self.create_server)
+        create_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #FF9800;
+                color: white;
+                padding: 12px 24px;
+                border-radius: 6px;
+                font-weight: bold;
+                border: none;
+                margin: 5px;
+            }
+            QPushButton:hover {
+                background-color: #F57C00;
+            }
+        """)
+        layout.addWidget(create_btn, 0, Qt.AlignCenter)
+        
+        # Кнопка повтора
         retry_btn = QPushButton("🔄 Попробовать снова")
         retry_btn.clicked.connect(self.start_discovery)
         retry_btn.setStyleSheet("""
@@ -876,6 +1347,7 @@ class ServerBrowserDialog(QDialog):
                 border-radius: 6px;
                 font-weight: bold;
                 border: none;
+                margin: 5px;
             }
             QPushButton:hover {
                 background-color: #1976d2;
@@ -963,17 +1435,29 @@ class ServerBrowserDialog(QDialog):
         
     def start_discovery(self):
         """Начало полного поиска серверов в сети"""
-        self.start_discovery_worker(quick_mode=False)
+        # Получаем все сети
+        networks = NetworkScanner.get_all_networks()
+        if networks:
+            self.start_discovery_with_networks(networks)
+        else:
+            self.start_discovery_worker(quick_mode=False)
         
     def start_quick_discovery(self):
         """Начало быстрого поиска серверов в сети"""
-        self.start_discovery_worker(quick_mode=True)
+        # Получаем все сети
+        networks = NetworkScanner.get_all_networks()
+        if networks:
+            self.start_discovery_with_networks(networks)
+        else:
+            self.start_discovery_worker(quick_mode=True)
         
     def start_discovery_worker(self, quick_mode: bool = False):
         """Запуск рабочего потока поиска"""
         # Переключаемся на экран загрузки
         self.stacked_widget.setCurrentWidget(self.loading_screen)
         self.loading_progress.setValue(0)
+        self.scanned_ips = []
+        self.ip_list_label.setText("Сканирование...")
         
         # Обновляем статус
         self.status_label.setText("Быстрый поиск серверов..." if quick_mode else "Подробный поиск серверов...")
@@ -981,11 +1465,12 @@ class ServerBrowserDialog(QDialog):
         # Отключаем кнопки во время поиска
         self.refresh_btn.setEnabled(False)
         self.connect_btn.setEnabled(False)
+        self.network_select_btn.setEnabled(False)
         
         # Запускаем поток поиска
         self.discovery_worker = DiscoveryWorker(quick_mode=quick_mode)
         self.discovery_worker.servers_found.connect(self.on_servers_found)
-        self.discovery_worker.discovery_progress.connect(self.loading_progress.setValue)
+        self.discovery_worker.discovery_progress.connect(self.update_discovery_progress)
         self.discovery_worker.discovery_error.connect(self.on_discovery_error)
         self.discovery_worker.finished.connect(self.on_discovery_finished)
         self.discovery_worker.start()
@@ -993,6 +1478,7 @@ class ServerBrowserDialog(QDialog):
     def on_discovery_error(self, error_message: str):
         """Обработка ошибки поиска"""
         self.status_label.setText(f"Ошибка поиска: {error_message}")
+        self.scan_info_panel.setText(f"❌ Ошибка: {error_message}")
         
     @pyqtSlot(list)
     def on_servers_found(self, servers: List[ServerInfo]):
@@ -1014,6 +1500,14 @@ class ServerBrowserDialog(QDialog):
             online = sum(1 for s in net_servers if s.is_online)
             print(f"   • {network}: {len(net_servers)} серверов ({online} онлайн)")
         
+        # Обновляем информацию в панели
+        if servers:
+            network_info = "\n".join([f"   • {network}: {len(net_servers)} серверов" 
+                                     for network, net_servers in servers_by_network.items()])
+            self.scan_info_panel.setText(f"✅ Найдено серверов: {len(servers)}\n{network_info}")
+        else:
+            self.scan_info_panel.setText("❌ Серверы не найдены")
+        
         self.update_server_list()
         self.update_stats()
         
@@ -1021,6 +1515,7 @@ class ServerBrowserDialog(QDialog):
         """Обработка завершения поиска"""
         # Включаем кнопки
         self.refresh_btn.setEnabled(True)
+        self.network_select_btn.setEnabled(True)
         
         # Обновляем статус
         online_count = sum(1 for s in self.found_servers if s.is_online)
@@ -1147,6 +1642,7 @@ class ServerBrowserDialog(QDialog):
             self.start_server_btn.setEnabled(True)
             self.edit_btn.setEnabled(True)
             self.delete_btn.setEnabled(True)
+            self.start_saved_btn.setEnabled(True)
             
     def on_saved_server_double_clicked(self, item):
         """Двойной клик по сохраненному серверу"""
@@ -1166,6 +1662,7 @@ class ServerBrowserDialog(QDialog):
         self.start_server_btn.setEnabled(is_saved)
         self.edit_btn.setEnabled(is_saved)
         self.delete_btn.setEnabled(is_saved)
+        self.start_saved_btn.setEnabled(is_saved)
         
     def show_server_info(self, server: ServerInfo):
         """Отображение информации о сервере"""
@@ -1428,7 +1925,12 @@ class ServerBrowserDialog(QDialog):
                 
     def create_server(self):
         """Создание нового сервера"""
-        dialog = ServerCreateDialog(self)
+        try:
+            from client.ui.server_create_dialog import ServerCreateDialog
+            dialog = ServerCreateDialog(self)
+        except ImportError:
+            QMessageBox.warning(self, "Ошибка", "Модуль создания сервера не найден")
+            return
         
         def on_server_created(server_config):
             # Запускаем создание сервера
@@ -1733,6 +2235,13 @@ class ServerBrowserDialog(QDialog):
             <li><b>Быстрый сервер</b> - быстро создать сервер с настройками по умолчанию</li>
             <li><b>Запустить сервер</b> - запустить сохраненный сервер</li>
             <li><b>Удалить сервер</b> - удалить сервер из списка сохраненных</li>
+        </ul>
+        
+        <h3>🌐 Выбор сети:</h3>
+        <ul>
+            <li>Можно выбрать конкретные сети для сканирования</li>
+            <li>Отображаются все доступные сетевые интерфейсы</li>
+            <li>Показывается прогресс сканирования и найденные IP</li>
         </ul>
         
         <h3>💡 Важная информация:</h3>

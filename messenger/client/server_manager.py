@@ -428,12 +428,14 @@ class ServerManager:
             
             # Запускаем сервер в отдельном процессе
             process = subprocess.Popen(
-                cmd,
-                cwd=str(server_path),
+                command,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=True,
-                encoding='utf-8'
+                stdin=subprocess.PIPE,
+                cwd=server_dir,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0,
+                encoding='cp866',  # или 'utf-8', в зависимости от системы
+                errors='replace'    # заменяет неподдерживаемые символы
             )
             
             # Сохраняем процесс

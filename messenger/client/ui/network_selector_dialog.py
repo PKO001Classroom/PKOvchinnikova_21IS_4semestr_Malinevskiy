@@ -1,15 +1,17 @@
 """
 Диалог выбора сетевого интерфейса для сканирования.
+Альтернативная версия без использования netifaces.
 """
 
-from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QWidgets,
+from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, 
                              QListWidget, QListWidgetItem, QPushButton,
                              QMessageBox, QFrame, QCheckBox)
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QFont, QColor
 import socket
-import netifaces
 import ipaddress
+import subprocess
+import re
 
 
 class NetworkSelectorDialog(QDialog):
@@ -28,8 +30,8 @@ class NetworkSelectorDialog(QDialog):
     def init_ui(self):
         """Инициализация пользовательского интерфейса"""
         self.setWindowTitle("🌐 Выбор сети для сканирования")
-        self.setGeometry(400, 300, 600, 500)
-        self.setMinimumSize(550, 450)
+        self.setGeometry(400, 300, 650, 550)
+        self.setMinimumSize(600, 500)
         
         layout = QVBoxLayout()
         layout.setContentsMargins(20, 20, 20, 20)
@@ -52,6 +54,7 @@ class NetworkSelectorDialog(QDialog):
         )
         info_label.setAlignment(Qt.AlignCenter)
         info_label.setStyleSheet("color: #666; font-size: 12px; padding: 5px;")
+        info_label.setWordWrap(True)
         layout.addWidget(info_label)
         
         # Разделитель
@@ -71,6 +74,7 @@ class NetworkSelectorDialog(QDialog):
                 background-color: white;
                 font-size: 13px;
                 padding: 5px;
+                min-height: 250px;
             }
             QListWidget::item {
                 padding: 12px 10px;
@@ -185,48 +189,64 @@ class NetworkSelectorDialog(QDialog):
         self.setLayout(layout)
         
     def load_network_interfaces(self):
-        """Загрузка доступных сетевых интерфейсов"""
+        """Загрузка доступных сетевых интерфейсов без netifaces"""
         try:
-            import netifaces
+            # Получаем имя хоста и все IP адреса
+            hostname = socket.gethostname()
+            all_ips = socket.gethostbyname_ex(hostname)[2]
             
-            interfaces = []
-            for iface in netifaces.interfaces():
-                addrs = netifaces.ifaddresses(iface)
+            # Добавляем локальный IP если он не в списке
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                s.connect(("8.8.8.8", 80))
+                local_ip = s.getsockname()[0]
+                s.close()
+                if local_ip not in all_ips:
+                    all_ips.append(local_ip)
+            except:
+                pass
+            
+            # Для каждого IP определяем сеть
+            for ip in all_ips:
+                if ip.startswith('127.'):  # Пропускаем loopback
+                    continue
                 
-                # Получаем IPv4 адрес
-                if netifaces.AF_INET in addrs:
-                    for addr in addrs[netifaces.AF_INET]:
-                        ip = addr['addr']
-                        netmask = addr.get('netmask', '255.255.255.0')
-                        
-                        # Пропускаем loopback
-                        if ip.startswith('127.'):
-                            continue
-                        
-                        # Вычисляем сеть
-                        try:
-                            network = ipaddress.IPv4Network(f"{ip}/{netmask}", strict=False)
-                            broadcast = str(network.broadcast_address)
-                        except:
-                            network = None
-                            broadcast = '255.255.255.255'
-                        
-                        interface_info = {
-                            'name': iface,
-                            'ip': ip,
-                            'netmask': netmask,
-                            'network': str(network.network_address) if network else 'unknown',
-                            'broadcast': broadcast,
-                            'cidr': str(network) if network else f"{ip}/24"
-                        }
-                        interfaces.append(interface_info)
+                # Определяем broadcast адрес (предполагаем /24 сеть)
+                parts = ip.split('.')
+                network = f"{parts[0]}.{parts[1]}.{parts[2]}.0"
+                broadcast = f"{parts[0]}.{parts[1]}.{parts[2]}.255"
+                cidr = f"{ip}/24"
+                
+                interface_info = {
+                    'name': f"Сеть {parts[0]}.{parts[1]}.{parts[2]}.0/24",
+                    'ip': ip,
+                    'netmask': '255.255.255.0',
+                    'network': network,
+                    'broadcast': broadcast,
+                    'cidr': cidr
+                }
+                self.interfaces.append(interface_info)
             
-            self.interfaces = interfaces
+            # Пробуем получить больше информации через ipconfig (Windows)
+            if not self.interfaces:
+                self._load_from_ipconfig()
+            
+            # Если все еще нет интерфейсов, добавляем broadcast на все интерфейсы
+            if not self.interfaces:
+                interface_info = {
+                    'name': 'Все сети (широковещательный)',
+                    'ip': '0.0.0.0',
+                    'netmask': '255.255.255.0',
+                    'network': '0.0.0.0',
+                    'broadcast': '255.255.255.255',
+                    'cidr': '0.0.0.0/0'
+                }
+                self.interfaces.append(interface_info)
             
             # Заполняем список
-            for iface in interfaces:
-                item_text = (f"{iface['name']} - {iface['ip']}\n"
-                           f"    Сеть: {iface['cidr']}, Broadcast: {iface['broadcast']}")
+            for iface in self.interfaces:
+                item_text = (f"{iface['name']}\n"
+                           f"    IP: {iface['ip']}, Broadcast: {iface['broadcast']}")
                 item = QListWidgetItem(item_text)
                 item.setData(Qt.UserRole, iface)
                 self.interface_list.addItem(item)
@@ -235,63 +255,68 @@ class NetworkSelectorDialog(QDialog):
             for i in range(self.interface_list.count()):
                 self.interface_list.item(i).setSelected(True)
             
-            self.stats_label.setText(f"Найдено интерфейсов: {len(interfaces)}")
-            self.scan_btn.setEnabled(len(interfaces) > 0)
-            
-        except ImportError:
-            # Если netifaces не установлен, используем простой метод
-            self.load_interfaces_simple()
-        except Exception as e:
-            print(f"Ошибка загрузки интерфейсов: {e}")
-            self.load_interfaces_simple()
-    
-    def load_interfaces_simple(self):
-        """Простая загрузка интерфейсов без netifaces"""
-        try:
-            hostname = socket.gethostname()
-            local_ip = socket.gethostbyname(hostname)
-            
-            # Получаем все IP адреса
-            ip_list = []
-            for ip in socket.gethostbyname_ex(hostname)[2]:
-                if not ip.startswith('127.'):
-                    ip_list.append(ip)
-            
-            if not ip_list:
-                ip_list = [local_ip]
-            
-            for ip in ip_list:
-                # Определяем broadcast адрес
-                parts = ip.split('.')
-                broadcast = f"{parts[0]}.{parts[1]}.{parts[2]}.255"
-                
-                interface_info = {
-                    'name': 'Основной интерфейс',
-                    'ip': ip,
-                    'netmask': '255.255.255.0',
-                    'network': f"{parts[0]}.{parts[1]}.{parts[2]}.0",
-                    'broadcast': broadcast,
-                    'cidr': f"{ip}/24"
-                }
-                self.interfaces.append(interface_info)
-                
-                item_text = (f"{interface_info['name']} - {ip}\n"
-                           f"    Сеть: {interface_info['cidr']}, Broadcast: {broadcast}")
-                item = QListWidgetItem(item_text)
-                item.setData(Qt.UserRole, interface_info)
-                self.interface_list.addItem(item)
-                item.setSelected(True)
-            
             self.stats_label.setText(f"Найдено интерфейсов: {len(self.interfaces)}")
             self.scan_btn.setEnabled(len(self.interfaces) > 0)
             
         except Exception as e:
-            print(f"Ошибка простой загрузки интерфейсов: {e}")
+            print(f"Ошибка загрузки интерфейсов: {e}")
+            # Добавляем заглушку
+            interface_info = {
+                'name': 'Локальная сеть',
+                'ip': '192.168.1.100',
+                'netmask': '255.255.255.0',
+                'network': '192.168.1.0',
+                'broadcast': '192.168.1.255',
+                'cidr': '192.168.1.0/24'
+            }
+            self.interfaces.append(interface_info)
+            
+            item_text = (f"{interface_info['name']}\n"
+                       f"    IP: {interface_info['ip']}, Broadcast: {interface_info['broadcast']}")
+            item = QListWidgetItem(item_text)
+            item.setData(Qt.UserRole, interface_info)
+            self.interface_list.addItem(item)
+            item.setSelected(True)
+            
+            self.stats_label.setText(f"Найдено интерфейсов: 1")
+            self.scan_btn.setEnabled(True)
+    
+    def _load_from_ipconfig(self):
+        """Загрузка интерфейсов через ipconfig (Windows)"""
+        try:
+            result = subprocess.run(['ipconfig'], capture_output=True, text=True, encoding='cp866')
+            lines = result.stdout.split('\n')
+            
+            current_iface = None
+            ip_pattern = re.compile(r'IPv4-адрес.*:\s*(\d+\.\d+\.\d+\.\d+)')
+            mask_pattern = re.compile(r'Маска подсети.*:\s*(\d+\.\d+\.\d+\.\d+)')
+            
+            for line in lines:
+                if 'адаптер' in line.lower():
+                    current_iface = line.strip()
+                elif current_iface:
+                    ip_match = ip_pattern.search(line)
+                    if ip_match:
+                        ip = ip_match.group(1)
+                        if not ip.startswith('127.'):
+                            parts = ip.split('.')
+                            interface_info = {
+                                'name': current_iface,
+                                'ip': ip,
+                                'netmask': '255.255.255.0',
+                                'network': f"{parts[0]}.{parts[1]}.{parts[2]}.0",
+                                'broadcast': f"{parts[0]}.{parts[1]}.{parts[2]}.255",
+                                'cidr': f"{ip}/24"
+                            }
+                            self.interfaces.append(interface_info)
+        except Exception as e:
+            print(f"Ошибка при выполнении ipconfig: {e}")
     
     def select_all(self):
         """Выбрать все интерфейсы"""
         for i in range(self.interface_list.count()):
             self.interface_list.item(i).setSelected(True)
+        self.scan_btn.setEnabled(self.interface_list.count() > 0)
     
     def deselect_all(self):
         """Снять выбор со всех интерфейсов"""

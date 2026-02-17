@@ -7,7 +7,7 @@ import json
 import time
 import logging
 import threading
-from typing import List, Optional, Dict, Callable
+from typing import List, Optional, Dict, Callable, Any
 from client.models.server_info import ServerInfo
 
 logger = logging.getLogger(__name__)
@@ -32,6 +32,9 @@ class BroadcastClient:
         self.buffer_size = 1024
         self.discovery_in_progress = False
         self.progress_callback: Optional[Callable[[int, int, str], None]] = None
+        self.found_servers_count = 0
+        self.scanned_networks = 0
+        self.total_networks = 0
         
     def discover_servers(self, networks: List[Dict] = None) -> List[ServerInfo]:
         """
@@ -43,41 +46,74 @@ class BroadcastClient:
         Returns:
             Список найденных серверов
         """
-        servers = []
+        all_servers = []
         self.discovery_in_progress = True
+        self.found_servers_count = 0
         
         try:
-            if networks:
+            if networks and len(networks) > 0:
                 # Сканируем каждую сеть отдельно
-                total_networks = len(networks)
+                self.total_networks = len(networks)
+                self.scanned_networks = 0
+                
                 for i, network in enumerate(networks):
                     if not self.discovery_in_progress:
                         break
                     
+                    self.scanned_networks = i
+                    
                     if self.progress_callback:
-                        self.progress_callback(i, total_networks, f"Сканирование {network['cidr']}")
+                        self.progress_callback(i, self.total_networks, 
+                                             f"Сканирование {network.get('cidr', network.get('name', 'сети'))}")
                     
                     network_servers = self._discover_on_network(network)
-                    servers.extend(network_servers)
+                    
+                    # Добавляем информацию о сети к каждому серверу
+                    for server in network_servers:
+                        server.discovery_network = network.get('cidr', network.get('name', 'unknown'))
+                        server.discovery_interface = network.get('ip', '0.0.0.0')
+                    
+                    all_servers.extend(network_servers)
+                    self.found_servers_count = len(all_servers)
                     
                     if self.progress_callback:
-                        self.progress_callback(i + 1, total_networks, f"Найдено {len(network_servers)} серверов в {network['cidr']}")
+                        self.progress_callback(i + 1, self.total_networks, 
+                                             f"Найдено {len(network_servers)} серверов в {network.get('cidr', 'сети')}")
             else:
                 # Используем стандартный broadcast
+                self.total_networks = 1
+                self.scanned_networks = 0
+                
                 if self.progress_callback:
                     self.progress_callback(0, 1, "Сканирование сети...")
                 
-                servers = self._discover_broadcast()
+                all_servers = self._discover_broadcast()
+                self.found_servers_count = len(all_servers)
                 
                 if self.progress_callback:
-                    self.progress_callback(1, 1, f"Сканирование завершено. Найдено {len(servers)} серверов")
+                    self.progress_callback(1, 1, f"Сканирование завершено. Найдено {len(all_servers)} серверов")
             
         except Exception as e:
             logger.error(f"Ошибка при поиске серверов: {e}")
         finally:
             self.discovery_in_progress = False
         
-        return servers
+        # Выводим итоговую статистику
+        if all_servers:
+            logger.info(f"Всего найдено серверов: {len(all_servers)}")
+            # Группируем по сетям
+            servers_by_network = {}
+            for server in all_servers:
+                network = getattr(server, 'discovery_network', 'unknown')
+                if network not in servers_by_network:
+                    servers_by_network[network] = []
+                servers_by_network[network].append(server)
+            
+            for network, servers in servers_by_network.items():
+                online = sum(1 for s in servers if s.is_online)
+                logger.info(f"  • {network}: {len(servers)} серверов ({online} онлайн)")
+        
+        return all_servers
     
     def _discover_on_network(self, network: Dict) -> List[ServerInfo]:
         """
@@ -95,20 +131,22 @@ class BroadcastClient:
             # Создаем UDP socket
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-            sock.settimeout(self.timeout)
+            sock.settimeout(min(self.timeout, 2.0))  # Уменьшаем таймаут для отдельных сетей
             
-            # Привязываемся к конкретному интерфейсу если указан
-            if 'ip' in network:
+            # Пытаемся привязаться к конкретному интерфейсу
+            bind_ip = network.get('ip', '0.0.0.0')
+            if bind_ip != '0.0.0.0':
                 try:
-                    sock.bind((network['ip'], 0))
-                except:
-                    pass
+                    sock.bind((bind_ip, 0))
+                    logger.debug(f"Привязан к интерфейсу {bind_ip}")
+                except Exception as e:
+                    logger.warning(f"Не удалось привязаться к {bind_ip}: {e}")
             
             # Формируем discovery запрос
             discovery_request = {
                 "type": "discovery",
                 "client_version": "1.0",
-                "client_ip": network.get('ip', '0.0.0.0'),
+                "client_ip": bind_ip,
                 "timestamp": time.time()
             }
             
@@ -121,6 +159,7 @@ class BroadcastClient:
             
             # Слушаем ответы от серверов
             start_time = time.time()
+            network_servers = []
             
             while time.time() - start_time < self.timeout and self.discovery_in_progress:
                 try:
@@ -128,10 +167,8 @@ class BroadcastClient:
                     server_info = self._parse_server_response(data, addr)
                     
                     if server_info:
-                        # Добавляем информацию о сети, в которой найден сервер
-                        server_info.discovery_network = network.get('cidr', 'unknown')
-                        servers.append(server_info)
-                        logger.info(f"Найден сервер: {server_info.name} ({server_info.ip}:{server_info.port}) в сети {network.get('cidr')}")
+                        network_servers.append(server_info)
+                        logger.info(f"Найден сервер: {server_info.name} ({server_info.ip}:{server_info.port})")
                         
                 except socket.timeout:
                     break
@@ -141,9 +178,10 @@ class BroadcastClient:
                     logger.warning(f"Ошибка при обработке ответа от {addr}: {e}")
             
             sock.close()
+            servers.extend(network_servers)
             
         except Exception as e:
-            logger.error(f"Ошибка при поиске в сети {network.get('cidr')}: {e}")
+            logger.error(f"Ошибка при поиске в сети {network.get('cidr', 'unknown')}: {e}")
         
         return servers
     
@@ -214,7 +252,7 @@ class BroadcastClient:
             ServerInfo или None если данные некорректны
         """
         try:
-            response = json.loads(data.decode('utf-8'))
+            response = json.loads(data.decode('utf-8', errors='ignore'))
             
             if response.get("type") != "server_response":
                 return None
@@ -239,8 +277,10 @@ class BroadcastClient:
                 last_seen=time.time()
             )
             
-            # Добавляем дополнительную информацию
+            # Добавляем дополнительные атрибуты
             server.response_data = response
+            server.discovery_network = "unknown"
+            server.discovery_interface = "0.0.0.0"
             
             return server
             
@@ -277,6 +317,15 @@ class BroadcastClient:
         """Остановка поиска"""
         self.discovery_in_progress = False
         logger.info("Поиск серверов остановлен")
+    
+    def get_discovery_stats(self) -> Dict[str, Any]:
+        """Получение статистики поиска"""
+        return {
+            "in_progress": self.discovery_in_progress,
+            "scanned_networks": self.scanned_networks,
+            "total_networks": self.total_networks,
+            "found_servers": self.found_servers_count
+        }
     
     def quick_discover(self, networks: List[Dict] = None) -> List[ServerInfo]:
         """

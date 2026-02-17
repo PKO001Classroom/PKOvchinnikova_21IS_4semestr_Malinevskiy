@@ -6,10 +6,9 @@
 import threading
 import time
 import logging
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Callable
 from dataclasses import dataclass
 
-# Исправляем импорты
 from client.models.server_info import ServerInfo
 from client.network.broadcast_client import BroadcastClient, get_broadcast_client
 
@@ -47,13 +46,17 @@ class ServerDiscovery:
         self.is_discovering = False
         self.last_discovery_time = 0
         self.callbacks = []
+        self.progress_callback: Optional[Callable[[int, int, str], None]] = None
         
         logger.info("ServerDiscovery инициализирован с интеграцией BroadcastClient")
     
-    def discover(self) -> List[ServerInfo]:
+    def discover(self, networks: List[Dict] = None) -> List[ServerInfo]:
         """
         Активный поиск серверов в сети.
         
+        Args:
+            networks: Список сетей для сканирования
+            
         Returns:
             Список обнаруженных серверов
         """
@@ -62,7 +65,11 @@ class ServerDiscovery:
         
         try:
             # Используем BroadcastClient для поиска
-            found_servers = self.broadcast_client.discover_servers()
+            if networks:
+                self.broadcast_client.progress_callback = self._on_progress
+                found_servers = self.broadcast_client.discover_servers(networks)
+            else:
+                found_servers = self.broadcast_client.discover_servers()
             
             # Обновляем кэш найденных серверов
             for server in found_servers:
@@ -72,6 +79,9 @@ class ServerDiscovery:
                 if server_key in self.found_servers:
                     self.found_servers[server_key].last_seen = time.time()
                     self.found_servers[server_key].is_online = True
+                    # Обновляем информацию о сети
+                    if hasattr(server, 'discovery_network'):
+                        self.found_servers[server_key].discovery_network = server.discovery_network
                 else:
                     server.last_seen = time.time()
                     self.found_servers[server_key] = server
@@ -82,7 +92,22 @@ class ServerDiscovery:
             # Помечаем старые серверы как оффлайн
             self._mark_offline_servers()
             
+            # Выводим статистику
+            stats = self.broadcast_client.get_discovery_stats()
             logger.info(f"Поиск завершен. Найдено серверов: {len(servers)}")
+            
+            if networks:
+                # Группируем по сетям для отчета
+                servers_by_network = {}
+                for server in servers:
+                    network = getattr(server, 'discovery_network', 'unknown')
+                    if network not in servers_by_network:
+                        servers_by_network[network] = []
+                    servers_by_network[network].append(server)
+                
+                for network, net_servers in servers_by_network.items():
+                    online = sum(1 for s in net_servers if s.is_online)
+                    logger.info(f"  • {network}: {len(net_servers)} серверов ({online} онлайн)")
             
         except Exception as e:
             logger.error(f"Ошибка при поиске серверов: {e}")
@@ -90,10 +115,33 @@ class ServerDiscovery:
         self.last_discovery_time = time.time()
         return list(self.found_servers.values())
     
-    def quick_discover(self) -> List[ServerInfo]:
+    def _on_progress(self, current: int, total: int, message: str):
+        """Обработка прогресса поиска"""
+        if self.progress_callback:
+            self.progress_callback(current, total, message)
+    
+    def discover_with_progress(self, networks: List[Dict] = None, 
+                              callback: Optional[Callable[[int, int, str], None]] = None) -> List[ServerInfo]:
+        """
+        Поиск серверов с отслеживанием прогресса.
+        
+        Args:
+            networks: Список сетей для сканирования
+            callback: Функция обратного вызова для прогресса
+            
+        Returns:
+            Список найденных серверов
+        """
+        self.progress_callback = callback
+        return self.discover(networks)
+    
+    def quick_discover(self, networks: List[Dict] = None) -> List[ServerInfo]:
         """
         Быстрый поиск серверов с меньшим таймаутом.
         
+        Args:
+            networks: Список сетей для сканирования
+            
         Returns:
             Список найденных серверов
         """
@@ -104,7 +152,7 @@ class ServerDiscovery:
             original_timeout = self.broadcast_client.timeout
             self.broadcast_client.timeout = 1.5
             
-            servers = self.discover()
+            servers = self.discover(networks)
             
             # Восстанавливаем таймаут
             self.broadcast_client.timeout = original_timeout
@@ -125,9 +173,12 @@ class ServerDiscovery:
                 server.is_online = False
                 logger.debug(f"Сервер {server.name} помечен как оффлайн")
     
-    def start_continuous_discovery(self):
+    def start_continuous_discovery(self, networks: List[Dict] = None):
         """
         Запуск непрерывного фонового поиска серверов.
+        
+        Args:
+            networks: Список сетей для сканирования
         """
         if self.is_discovering:
             logger.warning("Поиск уже запущен")
@@ -136,17 +187,18 @@ class ServerDiscovery:
         self.is_discovering = True
         self.discovery_thread = threading.Thread(
             target=self._discovery_loop,
+            args=(networks,),
             daemon=True,
             name="ServerDiscoveryThread"
         )
         self.discovery_thread.start()
         logger.info("Запущен фоновый поиск серверов")
     
-    def _discovery_loop(self):
+    def _discovery_loop(self, networks: List[Dict] = None):
         """Фоновый цикл поиска серверов"""
         while self.is_discovering:
             try:
-                servers = self.discover()
+                servers = self.discover(networks)
                 
                 # Вызываем колбэки если есть новые серверы
                 if servers and self.callbacks:
@@ -169,6 +221,10 @@ class ServerDiscovery:
         if self.discovery_thread:
             self.discovery_thread.join(timeout=2)
         logger.info("Фоновый поиск серверов остановлен")
+    
+    def stop_discovery(self):
+        """Остановка текущего поиска"""
+        self.broadcast_client.stop_discovery()
     
     def add_callback(self, callback):
         """
@@ -208,6 +264,21 @@ class ServerDiscovery:
         server_key = f"{ip}:{port}"
         return self.found_servers.get(server_key)
     
+    def get_servers_by_network(self) -> Dict[str, List[ServerInfo]]:
+        """
+        Получение серверов, сгруппированных по сетям.
+        
+        Returns:
+            Словарь {сеть: [серверы]}
+        """
+        result = {}
+        for server in self.found_servers.values():
+            network = getattr(server, 'discovery_network', 'unknown')
+            if network not in result:
+                result[network] = []
+            result[network].append(server)
+        return result
+    
     def clear_cache(self):
         """Очистка кэша найденных серверов"""
         self.found_servers.clear()
@@ -226,7 +297,6 @@ class ServerDiscovery:
             True если сервер доступен
         """
         try:
-            import socket
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(timeout)
             result = sock.connect_ex((ip, port))
@@ -247,48 +317,27 @@ def get_discovery_instance() -> ServerDiscovery:
     return _discovery_instance
 
 
-def discover_servers_once() -> List[ServerInfo]:
+def discover_servers_once(networks: List[Dict] = None) -> List[ServerInfo]:
     """
     Упрощенная функция для одноразового поиска серверов.
     
+    Args:
+        networks: Список сетей для сканирования
+        
     Returns:
         Список найденных серверов
     """
-    return get_discovery_instance().discover()
+    return get_discovery_instance().discover(networks)
 
 
-def quick_discover_servers() -> List[ServerInfo]:
+def quick_discover_servers(networks: List[Dict] = None) -> List[ServerInfo]:
     """
     Быстрый одноразовый поиск серверов.
     
+    Args:
+        networks: Список сетей для сканирования
+        
     Returns:
         Список найденных серверов
     """
-    return get_discovery_instance().quick_discover()
-
-
-# Тестирование модуля
-if __name__ == "__main__":
-    print("Тестирование модуля обнаружения серверов...")
-    
-    # Создаем конфигурацию с быстрым таймаутом для теста
-    test_config = DiscoveryConfig(timeout=1.0)
-    discovery = ServerDiscovery(test_config)
-    
-    print("Быстрый поиск серверов...")
-    
-    servers = discovery.quick_discover()
-    
-    if servers:
-        print(f"\nНайдено серверов: {len(servers)}")
-        for i, server in enumerate(servers, 1):
-            print(f"\n{i}. {server.name}")
-            print(f"   Адрес: {server.ip}:{server.port}")
-            print(f"   Пользователей: {server.users_count}")
-            print(f"   Требуется пароль: {'Да' if server.is_password_protected else 'Нет'}")
-            print(f"   Описание: {server.description}")
-            print(f"   Статус: {'🟢 Онлайн' if server.is_online else '⚫ Оффлайн'}")
-    else:
-        print("Серверы не найдены.")
-    
-    print("\nТест завершен.")
+    return get_discovery_instance().quick_discover(networks)
