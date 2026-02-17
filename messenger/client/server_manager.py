@@ -145,6 +145,7 @@ class ServerManager:
         
         except Exception as e:
             logger.error(f"Ошибка загрузки серверов: {e}")
+    
     def check_existing_server_on_localhost(self) -> Optional[Dict[str, Any]]:
         """
         Проверка наличия запущенного сервера на localhost.
@@ -372,6 +373,18 @@ class ServerManager:
             
             config = self.servers[server_name]
             
+            # Проверка, не запущен ли уже сервер
+            if server_name in self.running_servers:
+                # Проверяем, жив ли процесс
+                process = self.running_servers[server_name]
+                if process.poll() is None:
+                    return True, f"Сервер '{server_name}' уже запущен"
+                else:
+                    # Процесс завершился, удаляем из списка
+                    del self.running_servers[server_name]
+                    if server_name in self.server_processes:
+                        del self.server_processes[server_name]
+            
             # Проверка учетных данных
             success, message = self.verify_server_credentials(server_name, password)
             if not success:
@@ -399,7 +412,6 @@ class ServerManager:
                 
                 if not main_file:
                     return False, f"Основной файл сервера не найден в {config.server_path}"
-            
             else:
                 main_file = main_py
             
@@ -425,17 +437,21 @@ class ServerManager:
                     cmd.append(password)
             
             logger.info(f"Запуск сервера: {config.name} на {config.ip}:{config.port}")
+            logger.debug(f"Команда запуска: {' '.join(cmd)}")
+            
+            # Определяем кодировку для Windows
+            encoding = 'cp866' if os.name == 'nt' else 'utf-8'
             
             # Запускаем сервер в отдельном процессе
             process = subprocess.Popen(
-                command,
+                cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 stdin=subprocess.PIPE,
-                cwd=server_dir,
+                cwd=str(server_path),
                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0,
-                encoding='cp866',  # или 'utf-8', в зависимости от системы
-                errors='replace'    # заменяет неподдерживаемые символы
+                encoding=encoding,
+                errors='replace'  # заменяет неподдерживаемые символы
             )
             
             # Сохраняем процесс
@@ -455,20 +471,36 @@ class ServerManager:
             ).start()
             
             # Ждем немного чтобы убедиться что сервер запустился
-            time.sleep(3)
+            time.sleep(2)
             
             # Проверяем что процесс работает
             if process.poll() is not None:
-                stdout, stderr = process.communicate()
-                error_msg = stderr if stderr else "Сервер завершился при запуске"
+                # Процесс завершился, читаем ошибку
+                try:
+                    stdout, stderr = process.communicate(timeout=1)
+                    error_msg = stderr if stderr else stdout if stdout else "Неизвестная ошибка"
+                except:
+                    error_msg = "Сервер завершился при запуске"
+                
+                # Удаляем из списков
+                if server_name in self.running_servers:
+                    del self.running_servers[server_name]
+                if server_name in self.server_processes:
+                    del self.server_processes[server_name]
+                
                 return False, f"Ошибка запуска сервера: {error_msg}"
             
             # Проверяем доступность сервера
-            if not self.check_server_connection(server_name):
-                return False, "Сервер запущен, но недоступен по сети"
+            max_attempts = 10
+            for attempt in range(max_attempts):
+                time.sleep(1)
+                if self.check_server_connection(server_name):
+                    logger.info(f"Сервер '{server_name}' успешно запущен (PID: {process.pid})")
+                    return True, f"Сервер '{server_name}' запущен на {config.ip}:{config.port}"
             
-            logger.info(f"Сервер '{server_name}' успешно запущен (PID: {process.pid})")
-            return True, f"Сервер '{server_name}' запущен на {config.ip}:{config.port}"
+            # Сервер запущен но не отвечает
+            logger.warning(f"Сервер '{server_name}' запущен но не отвечает")
+            return True, f"Сервер '{server_name}' запущен но не отвечает. Проверьте настройки брандмауэра."
             
         except FileNotFoundError as e:
             logger.error(f"Файл не найден при запуске сервера: {e}")
@@ -480,21 +512,24 @@ class ServerManager:
     def _monitor_server_output(self, server_name: str, process: subprocess.Popen):
         """Мониторинг вывода сервера"""
         try:
-            stdout, stderr = process.communicate()
+            for line in process.stdout:
+                if line:
+                    logger.info(f"[{server_name}] {line.strip()}")
             
-            if stdout:
-                logger.info(f"[{server_name} stdout]: {stdout}")
+            for line in process.stderr:
+                if line:
+                    logger.error(f"[{server_name}] {line.strip()}")
             
-            if stderr:
-                logger.error(f"[{server_name} stderr]: {stderr}")
-                
+            # Ждем завершения процесса
+            returncode = process.wait()
+            
             # Удаляем из списка запущенных после завершения
             if server_name in self.running_servers:
                 del self.running_servers[server_name]
             if server_name in self.server_processes:
                 del self.server_processes[server_name]
                 
-            logger.info(f"Сервер '{server_name}' завершил работу")
+            logger.info(f"Сервер '{server_name}' завершил работу с кодом {returncode}")
                 
         except Exception as e:
             logger.error(f"Ошибка мониторинга вывода сервера {server_name}: {e}")
@@ -517,7 +552,7 @@ class ServerManager:
             process = self.running_servers[server_name]
             
             if force:
-                process.terminate()
+                process.kill()
                 message = f"Сервер '{server_name}' принудительно остановлен"
             else:
                 process.terminate()
@@ -531,7 +566,8 @@ class ServerManager:
                 message = f"Сервер '{server_name}' принудительно завершен"
             
             # Удаляем из списка запущенных
-            del self.running_servers[server_name]
+            if server_name in self.running_servers:
+                del self.running_servers[server_name]
             if server_name in self.server_processes:
                 del self.server_processes[server_name]
             
@@ -556,7 +592,18 @@ class ServerManager:
             return {"error": f"Сервер '{server_name}' не найден"}
         
         config = self.servers[server_name]
-        is_running = server_name in self.running_servers
+        
+        # Проверяем, запущен ли сервер
+        is_running = False
+        if server_name in self.running_servers:
+            process = self.running_servers[server_name]
+            if process.poll() is None:
+                is_running = True
+            else:
+                # Процесс завершился, удаляем из списка
+                del self.running_servers[server_name]
+                if server_name in self.server_processes:
+                    del self.server_processes[server_name]
         
         status = {
             "name": config.name,
@@ -670,7 +717,7 @@ class ServerManager:
             logger.error(f"Ошибка обновления сервера {server_name}: {e}")
             return False, f"Ошибка обновления: {str(e)}"
     
-    def check_server_connection(self, server_name: str, timeout: int = 3) -> bool:
+    def check_server_connection(self, server_name: str, timeout: int = 2) -> bool:
         """
         Проверка подключения к серверу.
         
@@ -699,6 +746,7 @@ class ServerManager:
         """Автозапуск серверов с флагом auto_start"""
         logger.info("Проверка серверов для автозапуска...")
         
+        started = 0
         for name, config in self.servers.items():
             if config.auto_start and not self.check_server_connection(name):
                 logger.info(f"Автозапуск сервера: {name}")
@@ -708,9 +756,13 @@ class ServerManager:
                 success, message = self.start_server(name, password=None)
                 
                 if success:
+                    started += 1
                     logger.info(f"Сервер {name} автозапущен: {message}")
                 else:
                     logger.error(f"Ошибка автозапуска сервера {name}: {message}")
+        
+        if started == 0:
+            logger.info("Серверы для автозапуска не найдены")
     
     def find_server_by_address(self, ip: str, port: int) -> Optional[str]:
         """
@@ -756,80 +808,80 @@ class ServerManager:
             auto_start=False
         )
     
-def get_quick_start_server(self) -> Tuple[bool, str, Dict[str, Any]]:
-    """
-    Создание быстрого сервера для новичков.
-    
-    Returns:
-        (успех, сообщение, данные сервера)
-    """
-    try:
-        # Сначала проверяем, есть ли уже сервер на localhost
-        existing_server = self.check_existing_server_on_localhost()
-        if existing_server:
-            return True, "Найден существующий сервер", existing_server
+    def get_quick_start_server(self) -> Tuple[bool, str, Dict[str, Any]]:
+        """
+        Создание быстрого сервера для новичков.
         
-        # Получаем локальный IP
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        local_ip = s.getsockname()[0]
-        s.close()
-        
-        # Ищем свободный порт
-        port = 8000
-        while port < 8100:
-            if self._check_port_available(local_ip, port):
-                break
-            port += 1
-        
-        if port >= 8100:
-            return False, "Не удалось найти свободный порт", {}
-        
-        # Генерируем имя
-        import random
-        adjectives = ["Быстрый", "Удобный", "Надежный", "Локальный", "Домашний", "Тестовый"]
-        nouns = ["Сервер", "Хаб", "Чат", "Мессенджер", "Узел", "Портал"]
-        
-        name = f"{random.choice(adjectives)} {random.choice(nouns)}"
-        
-        # Создаем сервер без пароля для простоты
-        success, message = self.create_server(
-            name=name,
-            ip=local_ip,
-            port=port,
-            description="Автоматически созданный сервер для быстрого старта",
-            password=None,
-            auto_start=False
-        )
-        
-        if success:
-            # Запускаем сервер
-            start_success, start_message = self.start_server(name)
-            if start_success:
-                server_data = {
-                    "name": name,
-                    "ip": local_ip,
-                    "port": port,
-                    "description": "Автоматически созданный сервер",
-                    "password_protected": False,
-                    "is_running": True
-                }
-                return True, f"Сервер создан и запущен: {start_message}", server_data
-            else:
-                server_data = {
-                    "name": name,
-                    "ip": local_ip,
-                    "port": port,
-                    "description": "Автоматически созданный сервер",
-                    "password_protected": False,
-                    "is_running": False
-                }
-                return True, f"Сервер создан, но не запущен: {start_message}", server_data
-        else:
-            return False, message, {}
+        Returns:
+            (успех, сообщение, данные сервера)
+        """
+        try:
+            # Сначала проверяем, есть ли уже сервер на localhost
+            existing_server = self.check_existing_server_on_localhost()
+            if existing_server:
+                return True, "Найден существующий сервер", existing_server
             
-    except Exception as e:
-        return False, f"Ошибка создания быстрого сервера: {str(e)}", {}
+            # Получаем локальный IP
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            local_ip = s.getsockname()[0]
+            s.close()
+            
+            # Ищем свободный порт
+            port = 8000
+            while port < 8100:
+                if self._check_port_available(local_ip, port):
+                    break
+                port += 1
+            
+            if port >= 8100:
+                return False, "Не удалось найти свободный порт", {}
+            
+            # Генерируем имя
+            import random
+            adjectives = ["Быстрый", "Удобный", "Надежный", "Локальный", "Домашний", "Тестовый"]
+            nouns = ["Сервер", "Хаб", "Чат", "Мессенджер", "Узел", "Портал"]
+            
+            name = f"{random.choice(adjectives)} {random.choice(nouns)}"
+            
+            # Создаем сервер без пароля для простоты
+            success, message = self.create_server(
+                name=name,
+                ip=local_ip,
+                port=port,
+                description="Автоматически созданный сервер для быстрого старта",
+                password=None,
+                auto_start=False
+            )
+            
+            if success:
+                # Запускаем сервер
+                start_success, start_message = self.start_server(name)
+                if start_success:
+                    server_data = {
+                        "name": name,
+                        "ip": local_ip,
+                        "port": port,
+                        "description": "Автоматически созданный сервер",
+                        "password_protected": False,
+                        "is_running": True
+                    }
+                    return True, f"Сервер создан и запущен: {start_message}", server_data
+                else:
+                    server_data = {
+                        "name": name,
+                        "ip": local_ip,
+                        "port": port,
+                        "description": "Автоматически созданный сервер",
+                        "password_protected": False,
+                        "is_running": False
+                    }
+                    return True, f"Сервер создан, но не запущен: {start_message}", server_data
+            else:
+                return False, message, {}
+                
+        except Exception as e:
+            return False, f"Ошибка создания быстрого сервера: {str(e)}", {}
 
 
 # Глобальный экземпляр для удобного доступа
